@@ -1,0 +1,219 @@
+[
+  {
+    "signal": "FLAP_POS (DB-15 pin 7)",
+    "gpio": 1,
+    "boardPin": "J3 GPIO1",
+    "peripheral": "ADC1_CH0",
+    "notes": "Gen2 front end: 22k series and 5.6k to GND, 100 nF to GND at the pin (scales up to about 14 V into 0-2.8 V). ADC_ATTEN_DB_12, curve-fitting calibration, average 32-64 samples. No internal pull-up. Re-run the flap calibration because the 12-bit ESP32-S3 scale differs from Gen2's 13-bit scale."
+  },
+  {
+    "signal": "VOLUME (DB-15 pin 10)",
+    "gpio": 2,
+    "boardPin": "J3 GPIO2",
+    "peripheral": "ADC1_CH1",
+    "notes": "Gen2 front end: 22k series, 22k to 3.3 V, 5.6k to GND, 100 nF. ADC1 keeps working with Wi-Fi on."
+  },
+  {
+    "signal": "OAT / spare analog",
+    "gpio": 4,
+    "boardPin": "J1 GPIO4",
+    "peripheral": "ADC1_CH3",
+    "notes": "Spare. Gen2 shares DB-15 pin 9 between OAT and display TX; this build uses pin 9 for display TX."
+  },
+  {
+    "signal": "PANEL_SWITCH (DB-15 pin 3)",
+    "gpio": 5,
+    "boardPin": "J1 GPIO5",
+    "peripheral": "GPIO in",
+    "notes": "150R series and 20k pull-up to 3.3 V (Gen2 R14/R13). Debounce in software."
+  },
+  {
+    "signal": "AOA_LED (DB-15 pin 5)",
+    "gpio": 6,
+    "boardPin": "J1 GPIO6",
+    "peripheral": "LEDC PWM",
+    "notes": "150R series (Gen2 R5). Pulses low for about 60 us at power-up, which is harmless."
+  },
+  {
+    "signal": "BOOM_RX (DB-15 pin 13)",
+    "gpio": 7,
+    "boardPin": "J1 GPIO7",
+    "peripheral": "UART0 RXD (GPIO matrix)",
+    "notes": "3.3 V TTL only, 150R series (Gen2 R11). The ESP32-S3 is not 5 V tolerant. The console moves to USB-Serial-JTAG, which frees UART0."
+  },
+  {
+    "signal": "I2C_A SDA",
+    "gpio": 8,
+    "boardPin": "J1 GPIO8",
+    "peripheral": "I2C0 SDA",
+    "notes": "Bus A: Pfwd MS4525DO (0x28) and SSCSRNN1.6BA7A3 (0x78). External 4.7k to 3.3 V. 400 kHz maximum."
+  },
+  {
+    "signal": "I2C_A SCL",
+    "gpio": 9,
+    "boardPin": "J1 GPIO9",
+    "peripheral": "I2C0 SCL",
+    "notes": "External 4.7k to 3.3 V."
+  },
+  {
+    "signal": "DISPLAY_TX (DB-15 pin 9)",
+    "gpio": 10,
+    "boardPin": "J1 GPIO10",
+    "peripheral": "UART2 TXD",
+    "notes": "115200 baud 3.3 V TTL to the M5Stack, 150R series (Gen2 R8)."
+  },
+  {
+    "signal": "EFIS_TX (DB-15 pin 12)",
+    "gpio": 11,
+    "boardPin": "J1 GPIO11",
+    "peripheral": "UART1 TXD",
+    "notes": "To MAX3232 T1IN, then T1OUT to DB-15 pin 12."
+  },
+  {
+    "signal": "I2S_BCLK",
+    "gpio": 12,
+    "boardPin": "J1 GPIO12",
+    "peripheral": "I2S0 BCLK",
+    "notes": "To PCM5102A BCK. Keep traces short; 33R series is optional."
+  },
+  {
+    "signal": "I2S_LRCK",
+    "gpio": 13,
+    "boardPin": "J1 GPIO13",
+    "peripheral": "I2S0 WS",
+    "notes": "To PCM5102A LRCK."
+  },
+  {
+    "signal": "I2S_DOUT",
+    "gpio": 14,
+    "boardPin": "J1 GPIO14",
+    "peripheral": "I2S0 DOUT",
+    "notes": "To PCM5102A DIN."
+  },
+  {
+    "signal": "EFIS_RX (DB-15 pin 2)",
+    "gpio": 15,
+    "boardPin": "J1 GPIO15",
+    "peripheral": "UART1 RXD",
+    "notes": "From MAX3232 R1OUT (R1IN from DB-15 pin 2, for example a Garmin G5)."
+  },
+  {
+    "signal": "GPS/VN-300_RX (DB-15 pin 4)",
+    "gpio": 16,
+    "boardPin": "J1 GPIO16",
+    "peripheral": "UART2 RXD",
+    "notes": "From MAX3232 R2OUT (Gen2 Serial2)."
+  },
+  {
+    "signal": "I2C_B SDA",
+    "gpio": 17,
+    "boardPin": "J1 GPIO17",
+    "peripheral": "I2C1 SDA",
+    "notes": "Bus B: P45 MS4525DO (0x28) and ISM330DHCX (0x6A), plus an optional ADS1115 (0x48). External 4.7k."
+  },
+  {
+    "signal": "I2C_B SCL",
+    "gpio": 18,
+    "boardPin": "J1 GPIO18",
+    "peripheral": "I2C1 SCL",
+    "notes": "External 4.7k. GPIO18 glitches high at power-up, which matches the bus idle state."
+  },
+  {
+    "signal": "DAC_XSMT (mute)",
+    "gpio": 21,
+    "boardPin": "J3 GPIO21",
+    "peripheral": "GPIO out",
+    "notes": "To PCM5102A XSMT with a 10k pull-down so the DAC stays muted until firmware releases it. Edge must be under 20 ns, so no RC filter. Mute before stopping I2S."
+  },
+  {
+    "signal": "SD_CLK",
+    "gpio": 39,
+    "boardPin": "J3 GPIO39",
+    "peripheral": "SDMMC CLK (matrix)",
+    "notes": "1-bit SDMMC at 20 MHz. JTAG MTCK is free because JTAG runs over USB."
+  },
+  {
+    "signal": "SD_CMD",
+    "gpio": 40,
+    "boardPin": "J3 GPIO40",
+    "peripheral": "SDMMC CMD",
+    "notes": "10k pull-up."
+  },
+  {
+    "signal": "SD_D0",
+    "gpio": 41,
+    "boardPin": "J3 GPIO41",
+    "peripheral": "SDMMC D0",
+    "notes": "10k pull-up."
+  },
+  {
+    "signal": "SD_D3 (CD/DAT3)",
+    "gpio": 42,
+    "boardPin": "J3 GPIO42",
+    "peripheral": "SDMMC D3 / GPIO",
+    "notes": "10k pull-up, holds the card in SD mode. Tie D1/D2 high through 10k."
+  },
+  {
+    "signal": "USB D- / D+ (console, flashing, JTAG)",
+    "gpio": 19,
+    "boardPin": "J3 GPIO19/GPIO20 (USB port)",
+    "peripheral": "USB-Serial-JTAG",
+    "notes": "Console. Never reconfigure GPIO19/20."
+  },
+  {
+    "signal": "UART0 TX to the on-board USB-UART bridge",
+    "gpio": 43,
+    "boardPin": "J3 TX",
+    "peripheral": "UART0 TXD (ROM boot log)",
+    "notes": "Left to the bridge only. The ROM boot log appears here and touches nothing else."
+  },
+  {
+    "signal": "UART0 RX from the on-board bridge",
+    "gpio": 44,
+    "boardPin": "J3 RX",
+    "peripheral": "not used",
+    "notes": "Do not connect."
+  },
+  {
+    "signal": "RGB status LED (on board)",
+    "gpio": 38,
+    "boardPin": "on board (v1.1; GPIO48 on v1.0)",
+    "peripheral": "RMT",
+    "notes": "Status only. Do not use GPIO38 or GPIO48 for anything else."
+  },
+  {
+    "signal": "BOOT button",
+    "gpio": 0,
+    "boardPin": "J3 GPIO0",
+    "peripheral": "strapping",
+    "notes": "Do not use."
+  },
+  {
+    "signal": "JTAG source strap",
+    "gpio": 3,
+    "boardPin": "J1 GPIO3",
+    "peripheral": "strapping",
+    "notes": "Do not use."
+  },
+  {
+    "signal": "VDD_SPI voltage strap",
+    "gpio": 45,
+    "boardPin": "J3 GPIO45",
+    "peripheral": "strapping",
+    "notes": "Do not use. Pulled high at reset, it selects 1.8 V flash and the board fails to boot."
+  },
+  {
+    "signal": "ROM-print / download strap",
+    "gpio": 46,
+    "boardPin": "J1 GPIO46",
+    "peripheral": "strapping",
+    "notes": "Do not use."
+  },
+  {
+    "signal": "Octal PSRAM (N8R8)",
+    "gpio": 35,
+    "boardPin": "GPIO35-37",
+    "peripheral": "PSRAM",
+    "notes": "Not available on N8R8 (GPIO33/34 are not broken out either)."
+  }
+]

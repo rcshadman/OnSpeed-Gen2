@@ -73,9 +73,9 @@ static void testCurve() {
   CalibrationCurve lg = {{0, 0, 2, 3}, 2}, ex = {{0, 0, 2, 0.5f}, 3};
   CHECK(fabsf(curveCalc(2.f, lg) - (2 * logf(2) + 3)) < 1e-5f, "log curve");
   CHECK(fabsf(curveCalc(2.f, ex) - (2 * expf(1))) < 1e-5f, "exp curve");
-  Core core(cfg);
-  struct { int pot, idx; } cases[] = {{0, 0}, {129, 0}, {143, 0}, {144, 1}, {158, 1}, {182, 1}, {183, 2}, {206, 2}, {1023, 2}};
-  for (auto &k : cases) {
+  struct { int pot, idx; } cases[] = {{129, 0}, {143, 0}, {144, 1}, {158, 1}, {182, 1}, {183, 2}, {206, 2}};
+  for (auto &k : cases) {  // fresh core: the first good reading sets the stage directly
+    Core core(cfg);
     core.sensorRead(8192, 8192, 1013, k.pot);
     CHECK(core.state().flapsIndex == k.idx, "pot %d -> index %d, want %d", k.pot, core.state().flapsIndex, k.idx);
   }
@@ -278,8 +278,74 @@ static void testSynth() {
   CHECK(p.gainLeft() >= 0 && p.gainRight() <= 2.0f, "large latG stays bounded (L %.2f R %.2f)", p.gainLeft(), p.gainRight());
 }
 
+// Gen2 Flaps.ino: nearest stage by midpoints, no hysteresis or debounce
+static int gen2Flaps(const Config &c, int pos) {
+  int i;
+  for (i = 1; i < c.flapCount; i++) if (pos <= (c.flapPotPositions[i] + c.flapPotPositions[i - 1]) / 2) return i - 1;
+  return i - 1;
+}
+static float gauss(unsigned &st) {  // Box-Muller from an LCG, deterministic
+  auto u = [&]() { st = st * 1664525u + 1013904223u; return ((st >> 8) + 1.0f) / 16777217.0f; };
+  float a = u(), b = u(); return sqrtf(-2 * logf(a)) * cosf(6.2831853f * b);
+}
+static void testFlaps() {
+  group("flap position sensing (port addition)");
+  Config cfg;
+  // ESP32-S3 ADC: ~6 LSB RMS at 12 bit with the radio on = ~12 counts on Gen2's 13-bit scale for one
+  // sample, ~2 counts after the 32-sample average the firmware takes; occasional 30 LSB spikes.
+  for (float sigma : {2.f, 12.f}) {
+    Core core(cfg); unsigned st = 99; int flipsOurs = 0, flipsGen2 = 0, lastO = -1, lastG = -1;
+    for (int i = 0; i < 3000; i++) {  // 60 s parked right on the 0/20 boundary (143.5)
+      int r = (int)lroundf(143.5f + sigma * gauss(st)) + (i % 211 == 0 ? 60 : 0);
+      core.sensorRead(8192, 8192, 1013, r);
+      int o = core.state().flapsIndex, g = gen2Flaps(cfg, r);
+      if (lastO >= 0 && o != lastO) flipsOurs++;
+      if (lastG >= 0 && g != lastG) flipsGen2++;
+      lastO = o; lastG = g;
+    }
+    printf("    lever parked on a boundary, noise %.0f counts RMS: Gen2 switches curves %d times in 60 s, port %d\n", sigma, flipsGen2, flipsOurs);
+    CHECK(flipsOurs <= 1, "boundary chatter %d", flipsOurs);
+  }
+  {  // slow travel 0 -> 20 over 3 s with noise: one clean change, shortly after crossing
+    Core core(cfg); unsigned st = 5; int changes = 0, last = 0; float tChange = -1;
+    for (int i = 0; i < 250; i++) {
+      float pos = 129 + (158 - 129) * std::min(1.f, i / 150.f);
+      core.sensorRead(8192, 8192, 1013, (int)lroundf(pos + 2 * gauss(st)));
+      int o = core.state().flapsIndex; if (o != last) { changes++; tChange = i * 0.02f; } last = o;
+    }
+    CHECK(changes == 1 && last == 1, "travel 0->20: %d changes, ends at %d", changes, last);
+    CHECK(tChange > 1.5f && tChange <= 3.0f, "switched at %.2f s (midpoint crossed at 1.5 s, detent reached at 3.0 s)", tChange);
+  }
+  {  // detent micro-switch bounce: 100 ms of alternating contacts, then settles
+    Core core(cfg); int changes = 0, last = 0;
+    for (int i = 0; i < 5; i++) { core.sensorRead(8192, 8192, 1013, i % 2 ? 158 : 129); changes += core.state().flapsIndex != last; last = core.state().flapsIndex; }
+    for (int i = 0; i < 30; i++) { core.sensorRead(8192, 8192, 1013, 158); changes += core.state().flapsIndex != last; last = core.state().flapsIndex; }
+    CHECK(changes == 1 && last == 1, "bounce: %d changes", changes);
+  }
+  {  // broken wire: input pulled to full scale (Gen2 enables the pull-up), then a short to ground
+    Core core(cfg);
+    for (int i = 0; i < 50; i++) core.sensorRead(8192, 8192, 1013, 158);
+    for (int i = 0; i < 20; i++) core.sensorRead(8192, 8192, 1013, 8191);
+    CHECK(core.state().flapFault && core.state().flapsIndex == 1, "open wire: fault, holds flaps 20");
+    CHECK(gen2Flaps(cfg, 8191) == 2, "Gen2 would select flaps 40 on an open wire");
+    for (int i = 0; i < 20; i++) core.sensorRead(8192, 8192, 1013, 0);
+    CHECK(core.state().flapFault && core.state().flapsIndex == 1, "short: fault, holds flaps 20");
+    for (int i = 0; i < 20; i++) core.sensorRead(8192, 8192, 1013, 158);
+    CHECK(!core.state().flapFault, "recovers");
+    Core never(cfg); for (int i = 0; i < 20; i++) never.sensorRead(8192, 8192, 1013, -1);
+    CHECK(never.state().flapFault && never.state().flapsIndex == 0, "no reading ever: flaps up, fault");
+  }
+  {  // learn mode with a reversed Hall sensor: 0 deg reads high
+    Core core(cfg); int learned[3] = {3100, 2400, 1500}, deg[3] = {0, 20, 40};
+    for (int k = 0; k < 3; k++) { for (int i = 0; i < 5; i++) core.sensorRead(8192, 8192, 1013, learned[k]); core.learnFlapPosition(k, deg[k]); }
+    int ok = 0;
+    for (int k = 0; k < 3; k++) { for (int i = 0; i < 30; i++) core.sensorRead(8192, 8192, 1013, learned[k] + 40); ok += core.state().flapsIndex == k && core.state().flapsPos == deg[k]; }
+    CHECK(ok == 3, "learned stages detected %d/3", ok);
+  }
+}
+
 int main() {
-  testParsing(); testFilter(); testCurve(); testAOA(); testTones(); testDisplaySentence(); testG5(); testFaults(); testSynth();
+  testParsing(); testFilter(); testCurve(); testAOA(); testTones(); testDisplaySentence(); testG5(); testFaults(); testFlaps(); testSynth();
   printf("\n%d checks passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

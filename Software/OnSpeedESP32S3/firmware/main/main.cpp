@@ -15,16 +15,23 @@
 #include "onspeed_core.h"
 #include "tone_synth.h"
 #include "g5.h"
+#include "canfix.h"
 #include "flight_model.h"
 #include "sensors.h"
+#include "imu_sim.h"
+#include "ahrs.h"
+#include "board_pins.h"
+#include "driver/gpio.h"
 
 #ifndef ONSPEED_SIM
 #define ONSPEED_SIM 1
 #endif
 
-static constexpr int kSampleRate = 22050;
+// 44.1 kHz: at 22.05 kHz/16-bit the bit clock (705.6 kHz) is below what the PCM5102A's internal PLL
+// accepts when SCK is tied low; 44.1 kHz also matches the Gen2 voice clips.
+static constexpr int kSampleRate = 44100;
 static constexpr int kTickMs = 20;
-static constexpr int kFramesPerTick = kSampleRate * kTickMs / 1000;  // 441
+static constexpr int kFramesPerTick = kSampleRate * kTickMs / 1000;  // 882
 
 static onspeed::Config g_cfg;
 static onspeed::Core *g_core;
@@ -49,6 +56,7 @@ static i2s_chan_handle_t g_i2s = nullptr;
   return i2s_channel_enable(g_i2s) == ESP_OK;
 }
 
+#if ONSPEED_SIM
 static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static int b64(const uint8_t *in, int n, char *out) {
   int o = 0;
@@ -63,10 +71,14 @@ static int b64(const uint8_t *in, int n, char *out) {
   return o;
 }
 
+#endif
+
 static void audioTask(void *) {
   static int16_t pcm[kFramesPerTick * 2];
-  static uint8_t u8[kFramesPerTick];   // 11025 Hz stereo u8 copy for the demo page
-  static char line[1024];
+#if ONSPEED_SIM
+  static uint8_t u8[kFramesPerTick / 2];   // 11025 Hz stereo u8 copy for the demo page
+  static char line[1100];
+#endif
   for (;;) {
     xSemaphoreTake(g_audioGo, portMAX_DELAY);
     if (g_done) { xSemaphoreGive(g_audioDone); vTaskDelete(nullptr); }
@@ -81,7 +93,7 @@ static void audioTask(void *) {
     onspeed::ToneEvent e;
     while (g_synth->popEvent(e)) printf("P,%lu,%u,%u,%.2f\n", (unsigned long)e.sampleIndex, e.freq, e.mode, e.volume);
     int n = 0;
-    for (int i = 0; i + 1 < kFramesPerTick; i += 2) {  // decimate 2:1
+    for (int i = 0; i + 3 < kFramesPerTick; i += 4) {  // decimate 4:1
       u8[n++] = (uint8_t)((pcm[2 * i] >> 8) + 128);
       u8[n++] = (uint8_t)((pcm[2 * i + 1] >> 8) + 128);
     }
@@ -97,15 +109,34 @@ static void sensorTask(void *) {
   SimSensorBus sim(g_cfg);
   SensorBus *bus = &sim;
 #if !ONSPEED_SIM
-  static I2cSensorBus hw;  // XIAO ESP32-S3 pin map: bus A D4/D5, bus B D9/D10, flap pot A0
-  if (hw.begin(5, 6, 8, 9, 0)) bus = &hw;
+  static I2cSensorBus hw;  // ESP32-S3-DevKitC-1 pin map, board_pins.h
+  if (hw.begin(PIN_I2C_A_SDA, PIN_I2C_A_SCL, PIN_I2C_B_SDA, PIN_I2C_B_SCL, ADC_CH_FLAP)) bus = &hw;
 #endif
   FlightModel fm;
   onspeed::G5Parser g5;
+  // CAN-FiX bus to the MakerPlane EFIS. On hardware the send hook queues to the TWAI driver;
+  // here it prints each frame the board puts on the bus.
+  static char canLine[512];
+  static int canLen = 0;
+  auto canTap = [](const onspeed::CanFrame &f, void *) {
+    if (canLen > (int)sizeof canLine - 32) return true;
+    canLen += snprintf(canLine + canLen, sizeof canLine - canLen, "%03X#", f.id);
+    for (int i = 0; i < f.dlc; i++) canLen += snprintf(canLine + canLen, sizeof canLine - canLen, "%02X", f.data[i]);
+    canLine[canLen++] = ' ';
+    canLine[canLen] = 0;
+    return true;
+  };
+  onspeed::CanfixNode can(onspeed::CanfixNode::Config{}, canTap, nullptr);
   const float dt = kTickMs / 1000.0f;
   const int ticks = (int)(fm.duration() / dt);
   const char *lastPhase = nullptr;
   uint32_t sensorCycles = 0;
+  ImuSim imu;
+  onspeed::AhrsConfig acfg;
+  acfg.imuSampleRate = 200;
+  acfg.fixKnownBugs = true;  // the port runs with the Gen2 bug fixes on (see ahrs.cpp BUG notes)
+  onspeed::Ahrs ahrs(acfg);
+  uint32_t ahrsCycles = 0;
   TickType_t wake = xTaskGetTickCount();
   for (int k = 0; k <= ticks; k++) {
     float t = k * dt;
@@ -113,13 +144,23 @@ static void sensorTask(void *) {
     const FlightState &fs = fm.state();
     sim.setFlight(fs);
 
+    // On-board AHRS (Gen2 Madgwick + Kalman port) fed by the simulated ISM330DHCX.
+    // The IMU runs at 200 Hz here (4 samples per 20 ms tick); the real chip runs at 208 Hz.
+    imu.step(fs, dt);
+    uint32_t a0 = esp_cpu_get_cycle_count();
+    for (int j = 0; j < 4; j++) {
+      onspeed::AircraftImu m = imu.sample();
+      if (k == 0 && j == 0) ahrs.begin(m, fs.palt);
+      ahrs.processAHRS(m, g_core->state().IAS, g_core->state().Palt, 15, g_core->state().AOA);
+    }
+    ahrsCycles += esp_cpu_get_cycle_count() - a0;
+
     uint32_t c0 = esp_cpu_get_cycle_count();
-    uint8_t pf[2], p45[2], ps[4];
-    bus->readPfwd(pf);
-    bus->readP45(p45);
-    bus->readStatic(ps);
-    g_core->sensorRead(onspeed::parseDiffPressure(pf), onspeed::parseDiffPressure(p45),
-                       onspeed::parseStaticPressure(ps), bus->readFlapPot());
+    uint8_t pf[2] = {0}, p45[2] = {0}, ps[4] = {0};
+    bool okF = bus->readPfwd(pf);
+    bool okA = bus->readP45(p45);
+    bool okS = bus->readStatic(ps);
+    g_core->sensorReadBytes(pf, okF, p45, okA, ps, okS, bus->readFlapPot());
     g_core->updateTones();
     const onspeed::State &st = g_core->state();
     g_synth->setToneState(st.toneMode, st.highTone, st.pps);
@@ -135,7 +176,7 @@ static void sensorTask(void *) {
                                fs.vertG, (int)fs.vsi);
       for (char *p = g5line; *p; p++) g5.feed(*p);
       g5line[strcspn(g5line, "\r\n")] = 0;
-      printf("G,%s\n", g5line);
+      if (ONSPEED_SIM) printf("G,%s\n", g5line);
 
       // Display serial out (to the M5Stack display), attitude taken from the G5.
       const onspeed::EfisData &ed = g5.data();
@@ -143,20 +184,44 @@ static void sensorTask(void *) {
       g_core->buildDisplaySentence(disp, sizeof disp, ed.pitch, ed.roll, st.Palt, 0, ed.lateralG,
                                    ed.verticalG, ed.vsi, fs.gamma, 0);
       disp[strcspn(disp, "\r\n")] = 0;
-      printf("S,%s\n", disp);
+      if (ONSPEED_SIM) printf("S,%s\n", disp);
+
+      // MakerPlane EFIS: the board sends AOA/IAS, the EFIS (node 0x91) sends attitude and air data
+      canLen = 0; canLine[0] = 0;
+      onspeed::OnSpeedOutputs o;
+      o.AOA = st.sensorFault ? onspeed::kNaN : st.AOA;
+      o.IAS = st.IAS;
+      o.LDmaxAOA = st.LDmaxAOA; o.onSpeedFastAOA = st.onSpeedAOAfast; o.onSpeedSlowAOA = st.onSpeedAOAslow;
+      o.stallWarnAOA = st.stallWarningAOA;
+      can.publish(o, k * kTickMs);
+      struct { uint16_t id; float v; } efis[] = {{onspeed::canfix::PITCH, fs.pitch}, {onspeed::canfix::ROLL, fs.bank},
+          {onspeed::canfix::IAS, fs.ias}, {onspeed::canfix::PALT, fs.palt}, {onspeed::canfix::HEAD, fs.heading},
+          {onspeed::canfix::VS, fs.vsi}, {onspeed::canfix::ALAT, fs.latG}, {onspeed::canfix::ANORM, fs.vertG}};
+      onspeed::CanFrame cf;
+      for (auto &e : efis) if (onspeed::canfix::encodeParam(0x91, e.id, e.v, cf)) can.onFrame(cf, k * kTickMs);
+      if (ONSPEED_SIM) printf("C,%s|%.2f,%.2f,%d\n", canLine, can.efis().pitch, can.efis().roll, can.fresh(k * kTickMs));
     }
-    if (fs.phase != lastPhase) { printf("PH,%d,%s\n", k * kTickMs, fs.phase); lastPhase = fs.phase; }
-    printf("D,%d,%.2f,%.4f,%.2f,%.1f,%.0f,%d,%d,%.2f,%d,%.2f,%.2f,%.3f,%.2f,%d,%.4f\n", k * kTickMs, fs.aoa,
+    if (ONSPEED_SIM) {
+      const onspeed::AhrsState &as = ahrs.state();
+      printf("A,%d,%.2f,%.2f,%.2f,%.2f,%.0f,%.0f\n", k * kTickMs, as.smoothedPitch, as.smoothedRoll, fs.pitch, fs.bank,
+             as.kalmanVSI * onspeed::AHRS_MPS2FPM, fs.vsi);
+    }
+    if (ONSPEED_SIM && fs.phase != lastPhase) { printf("PH,%d,%s\n", k * kTickMs, fs.phase); lastPhase = fs.phase; }
+    if (ONSPEED_SIM) printf("D,%d,%.2f,%.4f,%.2f,%.1f,%.0f,%d,%d,%.2f,%d,%.2f,%.2f,%.3f,%.2f,%d,%.4f,%d\n", k * kTickMs, fs.aoa,
            st.AOA, st.IAS, fs.ias, st.Palt, st.toneMode, st.highTone, st.pps, st.flapsPos, fs.pitch,
-           fs.bank, fs.latG, fs.vertG, g_core->percentLift(), st.coeffP);
+           fs.bank, fs.latG, fs.vertG, g_core->percentLift(), st.coeffP, st.sensorFault);
 
     xSemaphoreGive(g_audioGo);
     xSemaphoreTake(g_audioDone, portMAX_DELAY);
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(kTickMs));
   }
-  printf("M,sensor_cycles_per_tick=%lu,synth_cycles_per_block=%lu,g5_good=%lu,g5_bad=%lu\n",
+  const onspeed::State &fin = g_core->state();
+  printf("M,sensor_cycles_per_tick=%lu,synth_cycles_per_block=%lu,g5_good=%lu,g5_bad=%lu,can_sent=%lu,"
+         "pfwd_err=%lu,pfwd_stale=%lu,p45_diag=%lu,ahrs_cycles_per_update=%lu\n",
          (unsigned long)(sensorCycles / (ticks + 1)), (unsigned long)(g_synthCycles / g_synthBlocks),
-         (unsigned long)g5.data().goodFrames, (unsigned long)g5.data().badFrames);
+         (unsigned long)g5.data().goodFrames, (unsigned long)g5.data().badFrames, (unsigned long)can.framesSent(),
+         (unsigned long)fin.pfwdHealth.readErrors, (unsigned long)fin.pfwdHealth.stale, (unsigned long)fin.p45Health.diagnostic,
+         (unsigned long)(ahrsCycles / (4 * (ticks + 1))));
   g_done = true;
   xSemaphoreGive(g_audioGo);
   xSemaphoreTake(g_audioDone, portMAX_DELAY);
@@ -178,7 +243,16 @@ extern "C" void app_main(void) {
   g_audioGo = xSemaphoreCreateBinary();
   g_audioDone = xSemaphoreCreateBinary();
 #if !ONSPEED_SIM
-  i2sBegin(7, 44, 43);  // PCM5102A BCK/LRCK/DIN
+  // DAC stays muted (XSMT low, held by the board's pull-down) until I2S is clocking silence,
+  // which avoids the PCM5102A power-up pop.
+  gpio_set_direction((gpio_num_t)PIN_DAC_XSMT, GPIO_MODE_OUTPUT);
+  gpio_set_level((gpio_num_t)PIN_DAC_XSMT, 0);
+  if (i2sBegin(PIN_I2S_BCLK, PIN_I2S_WS, PIN_I2S_DOUT)) {
+    static int16_t zeros[256] = {0};
+    size_t w;
+    for (int i = 0; i < 8; i++) i2s_channel_write(g_i2s, zeros, sizeof zeros, &w, portMAX_DELAY);
+    gpio_set_level((gpio_num_t)PIN_DAC_XSMT, 1);
+  }
 #endif
   printf("BOOT,OnSpeed ESP32-S3 port test,cores=%d,sample_rate=%d\n", portNUM_PROCESSORS, kSampleRate);
   xTaskCreatePinnedToCore(audioTask, "audio", 8192, nullptr, 6, nullptr, 1);

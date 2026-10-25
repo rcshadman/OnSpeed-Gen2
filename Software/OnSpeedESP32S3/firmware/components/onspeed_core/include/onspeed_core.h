@@ -77,6 +77,26 @@ class PressureFilter {
   float avg_[10]; int avgN_ = 0, avgPos_ = 0;
 };
 
+// Port addition: flap position from the analog flap sensor (pot, Hall sensor or detent-switch
+// resistor ladder, all on Gen2's 13-bit / 3.3 V scale). Gen2 picks the nearest stage with no
+// hysteresis or fault check; this adds a dead band around each boundary, a debounce, an
+// out-of-range fault (open or shorted wire) that holds the last good stage, and learn mode.
+class FlapDetector {
+ public:
+  void configure(const int *positions, int count);
+  int update(int reading);           // returns the flap stage index
+  bool fault() const { return fault_; }
+  bool moving() const { return pending_ != idx_; }
+  int lastReading() const { return last_; }
+  static constexpr int kDebounce = 10;        // cycles (0.2 s at 50 Hz)
+  static constexpr int kFaultCycles = 10;
+ private:
+  int nearest(int r) const;
+  int pos_[5] = {0}, n_ = 1, idx_ = 0, pending_ = 0, stable_ = 0, faultRun_ = 0, last_ = 0;
+  int lo_ = 0, hi_ = 8191, hyst_ = 0;
+  bool fault_ = false, good_ = false;
+};
+
 // Port addition (not in Gen2): per-sensor read health. Gen2 masks the Honeywell status bits and
 // feeds a failed read (-1) straight into the filters; here a failed or diagnostic read reuses the
 // last good value and a run of them raises a fault that mutes the tones instead of sounding wrong ones.
@@ -105,7 +125,8 @@ struct State {
   bool highTone = false;
   float pps = 20;
   SensorHealth pfwdHealth, p45Health, staticHealth;
-  bool sensorFault = false;  // pitot-side pressure sensor failed: tones muted, display shows 0 AOA
+  bool sensorFault = false;
+  bool flapFault = false;    // flap sensor reading out of range: last good stage held  // pitot-side pressure sensor failed: tones muted, display shows 0 AOA
 };
 
 class Core {
@@ -125,6 +146,8 @@ class Core {
                            float vsiFpm, float flightPath, int dataMark) const;
   const State &state() const { return s_; }
   const Config &config() const { return cfg_; }
+  // Learn mode (ground only): store the current flap reading as stage i's position.
+  bool learnFlapPosition(int stage, int degrees);
  private:
   int getFlapsIndex(int pot) const;
   void setAOApoints(int i);
@@ -132,6 +155,7 @@ class Core {
   Config cfg_;
   State s_;
   PressureFilter fwdF_, p45F_;
+  FlapDetector flaps_;
 };
 
 }  // namespace onspeed

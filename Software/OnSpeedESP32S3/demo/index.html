@@ -134,6 +134,8 @@ ul.lim li::marker { color: var(--warn); }
       <div class="g5" id="s1">–</div>
       <div class="tag">MakerPlane EFIS ⇄ board (CAN-FiX frames, id#data)</div>
       <div class="g5" id="cf">–</div>
+      <div class="tag">On-board AHRS (Gen2 Madgwick + Kalman, simulated ISM330DHCX) vs truth</div>
+      <div class="g5" id="ah">–</div>
     </div>
   </section>
 
@@ -197,11 +199,11 @@ ul.lim li::marker { color: var(--warn); }
     <div class="bezel">
       <h2><span>What the simulator cannot show</span></h2>
       <ul class="lim">
-        <li>Real sensor behaviour: the pressure sensors, IMU and flap pot are simulated. The board parses the same bytes a Honeywell sensor sends, but I2C timing, noise and drift on real parts are untested.</li>
-        <li>Real audio hardware: the tone samples are real board output, but no I2S DAC or audio panel is attached. Levels into an intercom need a bench test.</li>
-        <li>Timing and CPU load: QEMU does not model ESP32-S3 speed, so whether everything fits in real time with Wi-Fi running is unproven.</li>
-        <li>AHRS: attitude comes from the simulated G5. The Gen2 Madgwick/Kalman code is not in this test.</li>
-        <li>Wi-Fi web UI, SD logging and the real M5Stack screen are not in this test. The display here redraws from the board's serial sentences with the M5 drawing rules.</li>
+        <li>Sensors are modelled from datasheets, not measured: pressure noise about 1.5 counts, ISM330DHCX noise, 10 mg accel offset and 0.05 °/s residual gyro bias, quantisation, plus injected stale reads, I²C dropouts and a sensor failure. Real parts still need a bench test.</li>
+        <li>Audio: the tone samples are real board output (44.1 kHz). The DAC level (2.1 Vrms) needs the −12 dB pad and a check on your audio panel.</li>
+        <li>Timing: QEMU does not run at ESP32-S3 speed. From datasheets, one 20 ms cycle needs under 1 ms of I²C time and the AHRS about 10 µs per sample, against a chip about 3× faster than the Teensy 3.6 (CoreMark 1330 vs 441).</li>
+        <li>AHRS: the Gen2 AHRS now runs on the board. In this flight it stays within about 1° in steady flight and in the 45° turn, but reads up to 2–4° off while speeding up or slowing down and on the takeoff roll, as the original does.</li>
+        <li>No Wi-Fi in flight by design. SD logging and the real M5Stack screen are not in this test; the display here redraws from the board's serial sentences.</li>
         <li>Aerodynamics: the flight is scripted, and manual mode uses a simple flight model. The test proves the port matches Gen2 logic, not that Gen2's calibration fits your aircraft.</li>
       </ul>
     </div>
@@ -212,7 +214,7 @@ ul.lim li::marker { color: var(--warn); }
 (() => {
 const $ = id => document.getElementById(id);
 const INTRO = {
-  auto: 'Everything below was produced by the ported firmware running on an emulated ESP32-S3 (Espressif QEMU): AOA from the simulated pressure sensors, the tone it chose, the audio samples it rendered, the sentences it sent to the M5Stack display, and the Garmin G5 data it read. This page replays that recording.',
+  auto: 'Everything below was produced by the ported firmware running on an emulated ESP32-S3 (Espressif QEMU): AOA from the simulated pressure sensors, the tone it chose, the audio samples it rendered, the sentences it sent to the M5Stack display, the Garmin G5 and MakerPlane CAN-FiX data it exchanged, and the attitude from its own AHRS. This page replays that recording.',
   man: 'Fly it with the stick, throttle and flaps. Each 20 ms the page makes the raw sensor bytes for your flight and runs them through the OnSpeed core compiled to WebAssembly, the same source files that run on the ESP32-S3. The tone you hear is that core\'s own synth output.'
 };
 let T = null, audioBuf = null, actx = null, src = null;
@@ -473,6 +475,7 @@ function renderAuto() {
   const di = Math.min(T.display.length - 1, Math.floor(i / 5));
   if (di !== lastDi) { const d = m5parse(T.display[di]); if (d) { if (Math.abs(di - lastDi) > 1) { M.aoa = d.aoa; M.latG = d.latG; M.lastIas = null; } m5feed(d); } lastDi = di; }
   show(r, T.display[di], T.g5[di], T.can ? T.can[di] : '');
+  if (T.ahrs && T.ahrs[i]) $('ah').innerHTML = `pitch <b>${T.ahrs[i][0].toFixed(1)}°</b> (true ${r.pitch.toFixed(1)}°) · roll <b>${T.ahrs[i][1].toFixed(1)}°</b> (true ${r.bank.toFixed(1)}°)`;
   drawChartCursor();
   $('clock').textContent = t.toFixed(1) + ' s';
   $('phase').textContent = phaseAt(i * 20);

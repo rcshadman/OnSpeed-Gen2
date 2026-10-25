@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 namespace onspeed {
 
@@ -69,9 +70,63 @@ float PressureFilter::add(float v) {
   return sum / avgN_;
 }
 
+void FlapDetector::configure(const int *positions, int count) {
+  n_ = count < 1 ? 1 : count > 5 ? 5 : count;
+  int mn = 8191, mx = 0, gap = 8191;
+  for (int i = 0; i < n_; i++) {
+    pos_[i] = positions[i];
+    if (pos_[i] < mn) mn = pos_[i];
+    if (pos_[i] > mx) mx = pos_[i];
+    if (i && abs(pos_[i] - pos_[i - 1]) < gap) gap = abs(pos_[i] - pos_[i - 1]);
+  }
+  if (n_ == 1) gap = 200;
+  hyst_ = gap / 4;                       // half of the half-gap around each boundary is dead band
+  int margin = gap > 40 ? gap : 40;      // readings this far beyond the end stops are a wiring fault
+  lo_ = mn - margin; hi_ = mx + margin;
+  idx_ = pending_ = stable_ = faultRun_ = 0;
+  fault_ = good_ = false;
+}
+
+int FlapDetector::nearest(int r) const {
+  int best = 0;
+  for (int i = 1; i < n_; i++) if (abs(r - pos_[i]) < abs(r - pos_[best])) best = i;
+  return best;
+}
+
+int FlapDetector::update(int r) {
+  last_ = r;
+  if (r < 0 || r < lo_ || r > hi_) {     // failed read, open wire (pulled to full scale) or short
+    if (++faultRun_ >= kFaultCycles) fault_ = true;
+    return idx_;
+  }
+  faultRun_ = 0;
+  fault_ = false;
+  int cand = nearest(r);
+  if (!good_) { good_ = true; idx_ = pending_ = cand; return idx_; }
+  if (cand != idx_) {
+    // must clear the boundary by the dead band before it counts as a new stage
+    int boundary = (pos_[cand] + pos_[idx_]) / 2;
+    if (abs(r - boundary) < hyst_) cand = idx_;
+  }
+  if (cand == idx_) { pending_ = idx_; stable_ = 0; return idx_; }
+  if (cand != pending_) { pending_ = cand; stable_ = 0; }
+  if (++stable_ >= kDebounce) { idx_ = pending_; stable_ = 0; }
+  return idx_;
+}
+
+bool Core::learnFlapPosition(int stage, int degrees) {
+  if (stage < 0 || stage >= MAX_AOA_CURVES || flaps_.lastReading() < 0) return false;
+  cfg_.flapPotPositions[stage] = flaps_.lastReading();
+  cfg_.flapDegrees[stage] = degrees;
+  if (stage + 1 > cfg_.flapCount) cfg_.flapCount = stage + 1;
+  flaps_.configure(cfg_.flapPotPositions, cfg_.flapCount);
+  return true;
+}
+
 Core::Core(const Config &cfg) : cfg_(cfg) {
   fwdF_.init(cfg_.pressureSmoothing);
   p45F_.init(cfg_.pressureSmoothing);
+  flaps_.configure(cfg_.flapPotPositions, cfg_.flapCount);
   setAOApoints(0);
 }
 
@@ -113,7 +168,8 @@ void Core::sensorRead(int pfwdRaw, int p45Raw, float pStaticMbar, int flapPotRaw
   s_.Pfwd = pfwdRaw - cfg_.pFwdBias;
   s_.P45 = p45Raw - cfg_.p45Bias;
   s_.flapPotRaw = flapPotRaw;
-  s_.flapsIndex = getFlapsIndex(flapPotRaw);
+  s_.flapsIndex = flaps_.update(flapPotRaw);
+  s_.flapFault = flaps_.fault();
   s_.flapsPos = cfg_.flapDegrees[s_.flapsIndex];
   setAOApoints(s_.flapsIndex);
 

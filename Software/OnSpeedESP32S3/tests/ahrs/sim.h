@@ -10,6 +10,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <functional>
 #include <random>
 #include <vector>
@@ -89,8 +90,7 @@ struct SensorCfg {
   double gyrRW = 0.002;              // dps/rts (~0.05 dps over 10 min)
   double baroNoise = 0.3;            // m, white per sample, before 0.122 mbar quantisation
   bool baroQuantize = true;          // SSCSRNN1.6BA7A3 14-bit counts (~1 m/count at SL)
-  double iasNoise = 0.3;             // kt
-  double iasDelay = 0.23;            // s, median(15)+SMA(10) at 50 Hz group delay in SensorRead()
+  double pfwdNoisePa = 2.1;          // Pa rms on Pfwd (~2 counts of the +/-1 psi 14-bit sensor)
   double turbN = 0, turbMu = 0;      // turbulence std: load factor (g), bank (deg)
   double turbAlpha = 0;              // AOA std (deg), extra
   uint64_t seed = 1;
@@ -113,7 +113,7 @@ class Sim {
     tN_.init(0.6, dtf_, rng_); tMu_.init(1.2, dtf_, rng_); tA_.init(0.4, dtf_, rng_);
     prev_ = evalFine(); stepFine(); cur_ = evalFine(); stepFine(); next_ = evalFine();
     ias_ = init.V / ((1 + -init.D / 0.3048 / 1000 * 0.02) * KT);
-    iasBuf_.assign(size_t(c_.iasDelay * 50) + 1, ias_);
+    med_.assign(15, ias_); sma_.assign(10, ias_);
   }
   double gyroBias(int i) const { return gb_[i]; }
   void setGyroBias(double b) { for (int i = 0; i < 3; i++) gb_[i] = b * (gb_[i] >= 0 ? 1 : -1); }
@@ -147,12 +147,22 @@ class Sim {
     double mbar = 1013.25 * pow(1 - hft / 145366.45, 1 / 0.190284);
     if (c_.baroQuantize) { double cnt = std::round(mbar / 1000 * 8192 + 1638.4); mbar = (cnt - 1638.4) / 8192 * 1000; }
     *Palt = float(145366.45 * (1 - pow(mbar / 1013.25, 0.190284)));
-    // IAS at 50 Hz with the SensorRead() filter delay; inverse of Gen2's TAS rule of thumb
+    // IAS at 50 Hz through the SensorRead() chain: Pfwd counts (noise + 1.05 Pa quantisation,
+    // +/-1 psi 14-bit sensor) -> median(15) -> SMA(10) -> IAS. Filtering IAS instead of
+    // pressure is equivalent to first order.
     if (cur_.t >= nextIas_) {
       nextIas_ += 0.02;
-      double ias = cur_.tas / ((1 + cur_.alt / 0.3048 / 1000 * 0.02) * KT) + c_.iasNoise * nd(rng_);
-      iasBuf_.push_back(ias); iasBuf_.erase(iasBuf_.begin());
-      ias_ = iasBuf_.front();
+      double iasTrue = cur_.tas / ((1 + cur_.alt / 0.3048 / 1000 * 0.02) * KT);
+      double qd = 0.5 * 1.225 * pow(iasTrue * KT, 2) + c_.pfwdNoisePa * nd(rng_);
+      qd = std::round(qd / 1.0521) * 1.0521;
+      double raw = qd > 0 ? sqrt(2 * qd / 1.225) / KT : 0;
+      med_.push_back(raw); if (med_.size() > 15) med_.erase(med_.begin());
+      std::vector<double> srt = med_; std::sort(srt.begin(), srt.end());
+      size_t m = srt.size();
+      double median = (m & 1) ? srt[m / 2] : (srt[m / 2] + srt[m / 2 - 1]) / 2;
+      sma_.push_back(median); if (sma_.size() > 10) sma_.erase(sma_.begin());
+      double sum = 0; for (double x : sma_) sum += x;
+      ias_ = sum / sma_.size();
     }
     *IAS = float(ias_);
     for (int k = 0; k < c_.sub; k++) { prev_ = cur_; cur_ = next_; stepFine(); next_ = evalFine(); }
@@ -234,7 +244,7 @@ class Sim {
   GM2 tN_, tMu_, tA_;
   double turbN_ = 0, turbMu_ = 0, turbA_ = 0;
   Truth prev_{}, cur_{}, next_{};
-  std::vector<double> iasBuf_;
+  std::vector<double> med_, sma_;
   double ias_ = 0, nextIas_ = 0;
 };
 

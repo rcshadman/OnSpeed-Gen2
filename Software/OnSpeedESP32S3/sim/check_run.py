@@ -5,7 +5,7 @@ import base64, json, math, sys, os
 import numpy as np
 
 log, out = sys.argv[1], sys.argv[2]
-D, S, G, P, PH, W, M = [], [], [], [], [], [], ""
+D, S, G, P, PH, W, M, CAN, A = [], [], [], [], [], [], "", [], []
 for line in open(log, errors="replace"):
     line = line.rstrip("\r\n")
     if line.startswith("D,"):
@@ -13,7 +13,7 @@ for line in open(log, errors="replace"):
         D.append(dict(t=int(f[0]), aoaTrue=float(f[1]), aoa=float(f[2]), ias=float(f[3]), iasTrue=float(f[4]),
                       palt=float(f[5]), mode=int(f[6]), high=int(f[7]), pps=float(f[8]), flaps=int(f[9]),
                       pitch=float(f[10]), bank=float(f[11]), latG=float(f[12]), vertG=float(f[13]),
-                      pl=int(f[14]), cp=float(f[15])))
+                      pl=int(f[14]), cp=float(f[15]), fault=int(f[16]) if len(f) > 16 else 0))
     elif line.startswith("S,"): S.append(line[2:])
     elif line.startswith("G,"): G.append(line[2:])
     elif line.startswith("P,"):
@@ -22,6 +22,10 @@ for line in open(log, errors="replace"):
         _, t, txt = line.split(",", 2); PH.append(dict(t=int(t), text=txt))
     elif line.startswith("W,"): W.append(line[2:])
     elif line.startswith("M,"): M = line
+    elif line.startswith("C,"): CAN.append(line[2:])
+    elif line.startswith("A,"):
+        f = line.split(",")[1:]
+        A.append(dict(t=int(f[0]), p=float(f[1]), r=float(f[2]), pT=float(f[3]), rT=float(f[4]), vsi=float(f[5]), vsiT=float(f[6])))
 
 checks = []
 def check(name, ok, detail):
@@ -47,9 +51,10 @@ def gen2_tone(aoa, ias, flaps):
 # 1. Tone decision matches the Gen2 rules on every cycle
 def on_edge(d):  # the log keeps 4 decimals; a value this close to a setpoint can't be judged from it
     return any(abs(d["aoa"] - v) < 0.0006 for v in SP[d["flaps"]]) or abs(d["ias"] - MUTE) < 0.006
-bad = [d for d in D if not on_edge(d) and (lambda m, p: m != d["mode"] or abs(p - d["pps"]) > 0.02)(*gen2_tone(d["aoa"], d["ias"], d["flaps"]))]
+bad = [d for d in D if not on_edge(d) and not d["fault"] and (lambda m, p: m != d["mode"] or abs(p - d["pps"]) > 0.02)(*gen2_tone(d["aoa"], d["ias"], d["flaps"]))]
 edge = sum(on_edge(d) for d in D)
-check("Tone choice follows Gen2 rules", not bad, f"{len(D) - len(bad) - edge}/{len(D) - edge} cycles match updateTones() ({edge} cycles sit exactly on a setpoint)")
+nf = sum(d["fault"] for d in D)
+check("Tone choice follows Gen2 rules", not bad, f"{len(D) - len(bad) - edge - nf}/{len(D) - edge - nf} cycles match updateTones() ({edge} cycles sit exactly on a setpoint, {nf} in the injected sensor fault)")
 
 # 2. AOA tracks the true AOA once the Gen2 filters settle (steady parts of the flight)
 flying = [d for d in D if d["iasTrue"] > 40]
@@ -137,7 +142,7 @@ def tone_at(t):
 
 segs = [("Cruise, AOA 1.5: silent", 28, 33, "off"),
         ("L/Dmax, AOA ~9.5: low-tone pulses", 50.5, 53.5, "low"),
-        ("OnSpeed, AOA 12.5: solid low tone", 57.5, 61.5, "solid"),
+        ("OnSpeed, AOA 12.5: solid low tone (incl. a 0.2 s sensor dropout)", 57.5, 61.4, "solid"),
         ("Slow, AOA ~15: high-tone pulses", 68.2, 69.5, "high"),
         ("Stall warning, AOA 17.5: 20 pulses/s", 73.5, 75.8, "stall"),
         ("Taxi under 25 kt: muted", 0.5, 3.5, "off")]
@@ -168,6 +173,66 @@ ap = [d for d in D if 121 <= d["t"] / 1000 <= 127]
 check("Flap position selects flaps-20 curve and setpoints", all(d["flaps"] == 20 for d in ap) and all(d["mode"] == 2 for d in ap),
       f"flaps {set(d['flaps'] for d in ap)} and solid OnSpeed tone throughout the approach")
 
+# Sensor faults injected by the simulator (sensors.cpp): 58.0-58.2 s Pfwd I2C failures, 61.0-61.8 s P45 diagnostic
+ride = [d for d in D if 57.9 <= d["t"] / 1000 <= 58.5]
+check("Short sensor dropout rides through", all(not d["fault"] and d["mode"] == 2 for d in ride) and mm.get("pfwd_err") == "10",
+      f"{mm.get('pfwd_err')} failed Pfwd reads, no fault raised, solid tone held; {mm.get('pfwd_stale')} stale-status reads accepted")
+ft = [d["t"] / 1000 for d in D if d["fault"]]
+rec = [d for d in D if 62.6 <= d["t"] / 1000 <= 63.0]
+okf = ft and 61.45 <= ft[0] <= 61.55 and ft[-1] < 61.85 and all(d["mode"] == 3 for d in D if d["fault"]) and all(d["mode"] == 2 for d in rec)
+check("Failed sensor mutes the tones, then recovers", okf,
+      f"P45 diagnostic status from 61.0 s: fault raised at {ft[0] if ft else 0:.2f} s, tones off while faulted, cleared at {ft[-1] + 0.02 if ft else 0:.2f} s, OnSpeed tone back by 62.6 s")
+
+# CAN-FiX to the MakerPlane EFIS, decoded with MakerPlane's own python-canfix library
+try:
+    import can, canfix
+    aoaErr, sent, efisOk, status = [], 0, 0, 0
+    for i, line in enumerate(CAN):
+        frames, efis = line.split("|")
+        for fr in frames.split():
+            cid, data = fr.split("#")
+            msg = can.Message(arbitration_id=int(cid, 16), data=bytes.fromhex(data), is_extended_id=False)
+            pm = canfix.parseMessage(msg)
+            if isinstance(pm, canfix.Parameter) and pm.node == 0x50 and pm.identifier == 0x182 and not pm.meta:
+                aoaErr.append(abs(pm.value - D[i * 5]["aoa"])) if not D[i * 5]["fault"] else None
+            if int(cid, 16) == 0x6E0 + 0x50: status += 1
+            sent += 1
+        p_, r_, fresh = efis.split(",")
+        efisOk += abs(float(p_) - D[i * 5]["pitch"]) < 0.02 and fresh == "1"
+    check("MakerPlane EFIS (CAN-FiX): AOA out", aoaErr and max(aoaErr) <= 0.006 and status >= len(CAN) // 10 - 1,
+          f"{len(aoaErr)} AOA frames decoded by python-canfix, max error {max(aoaErr):.3f} deg; {status} node status frames (1 Hz)")
+    check("MakerPlane EFIS (CAN-FiX): attitude in", efisOk == len(CAN),
+          f"{efisOk}/{len(CAN)} cycles: the board's CAN-FiX decoder holds the EFIS pitch/roll the simulator sent")
+except ImportError:
+    print("info: python-canfix not installed, CAN-FiX checks skipped")
+
+# On-board AHRS (Gen2 Madgwick/Kalman port) fed by the simulated ISM330DHCX
+if A:
+    # airborne: rotation at 10 s to the flare at 148 s (the takeoff roll's 0.65 g acceleration is reported separately)
+    up = lambda i: 10000 <= D[i]["t"] <= 148000
+    air = [a for i, a in enumerate(A) if up(i)]
+    def steady(i, key, tol):  # truth unchanged for the last 3 s
+        w = A[max(0, i - 150):i + 1]
+        return len(w) > 140 and max(x[key] for x in w) - min(x[key] for x in w) < tol
+    spd = lambda i: max(D[j]["iasTrue"] for j in range(max(0, i - 150), i + 1)) - min(D[j]["iasTrue"] for j in range(max(0, i - 150), i + 1)) < 1
+    wl = [a for i, a in enumerate(A) if up(i) and abs(a["rT"]) < 0.5 and steady(i, "pT", 0.5) and steady(i, "rT", 0.5)]
+    lvl = [a for i, a in enumerate(A) if up(i) and abs(a["rT"]) < 0.5 and steady(i, "pT", 0.5) and steady(i, "rT", 0.5) and spd(i)]
+    trn = [a for i, a in enumerate(A) if abs(a["rT"] - 45) < 0.1 and steady(i, "pT", 0.5) and steady(i, "rT", 0.1)]
+    e = lambda xs, k: max(abs(x[k] - x[k + "T"]) for x in xs)
+    check("On-board AHRS, straight flight", lvl and e(lvl, "p") < 1.5 and e(lvl, "r") < 1.5,
+          f"max pitch error {e(lvl, 'p'):.2f} deg, roll {e(lvl, 'r'):.2f} deg over {len(lvl)} cycles at constant speed (incl. the IMU's 10 mg offset, about 0.6 deg)")
+    print(f"info: AHRS wings level while speeding up or slowing down: max pitch error {e(wl, 'p'):.2f} deg (Gen2 compensates dTAS/dt from smoothed, lagging IAS)")
+    check("On-board AHRS, steady 45 deg turn", trn and e(trn, "p") < 1.5 and e(trn, "r") < 1.5,
+          f"max pitch error {e(trn, 'p'):.2f} deg, roll {e(trn, 'r'):.2f} deg over {len(trn)} cycles")
+    # the flight model stops altitude at its 1000 ft floor while still reporting the descent rate; skip those cycles
+    vs = [a for i, a in enumerate(A) if up(i) and D[i]["palt"] > 1015 and steady(i, "vsiT", 20)]
+    check("On-board AHRS, vertical speed (Kalman)", vs and max(abs(a["vsi"] - a["vsiT"]) for a in vs) < 150,
+          f"max VSI error {max(abs(a['vsi'] - a['vsiT']) for a in vs):.0f} fpm over {len(vs)} steady cycles")
+    wp = max(air, key=lambda a: abs(a["p"] - a["pT"])); wr = max(air, key=lambda a: abs(a["r"] - a["rT"]))
+    roll_ = [a for i, a in enumerate(A) if 4000 <= D[i]["t"] < 10000]
+    print(f"info: AHRS pitch error during the takeoff roll (0.65 g along the runway): max {max(abs(a['p'] - a['pT']) for a in roll_):.2f} deg")
+    print(f"info: worst AHRS error in flight incl. manoeuvres: pitch {abs(wp['p'] - wp['pT']):.2f} deg at {wp['t'] / 1000:.1f} s, roll {abs(wr['r'] - wr['rT']):.2f} deg at {wr['t'] / 1000:.1f} s")
+
 print(M)
 os.makedirs(out, exist_ok=True)
 # compact trace for the demo page: every cycle (50 Hz) and display sentences (10 Hz)
@@ -176,7 +241,8 @@ trace = dict(
     cols=["aoaTrue", "aoa", "ias", "pitch", "bank", "latG", "vertG", "palt", "mode", "high", "pps", "flaps", "pl"],
     rows=[[round(d["aoaTrue"], 2), round(d["aoa"], 2), round(d["ias"], 1), round(d["pitch"], 2), round(d["bank"], 1),
            round(d["latG"], 3), round(d["vertG"], 2), round(d["palt"]), d["mode"], d["high"], round(d["pps"], 2), d["flaps"], d["pl"]] for d in D],
-    display=S, g5=G[::1], checks=checks, metrics=M, audioRate=fs)
+    ahrs=[[round(a["p"], 2), round(a["r"], 2)] for a in A],
+    display=S, g5=G[::1], can=[c.split("|")[0].strip() for c in CAN], checks=checks, metrics=M, audioRate=fs)
 json.dump(trace, open(os.path.join(out, "trace.json"), "w"), separators=(",", ":"))
 # board audio as 8-bit stereo WAV
 import wave

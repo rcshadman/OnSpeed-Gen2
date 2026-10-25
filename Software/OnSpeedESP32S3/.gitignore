@@ -1,0 +1,9 @@
+tests/*/*.o
+tests/*/*.dis
+tests/core/test_core
+tests/ahrs/test_ahrs
+tests/ahrs/bench_ahrs
+tests/ahrs/opcount_host
+tests/ahrs_flight/run_flight
+tests/canfix/*_test
+firmware/build*/
