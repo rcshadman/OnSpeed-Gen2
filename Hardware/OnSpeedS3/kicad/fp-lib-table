@@ -1,0 +1,3 @@
+(fp_lib_table
+  (lib (name "OnSpeed")(type "KiCad")(uri "${KIPRJMOD}/onspeed.pretty")(options "")(descr "OnSpeed custom footprints"))
+)

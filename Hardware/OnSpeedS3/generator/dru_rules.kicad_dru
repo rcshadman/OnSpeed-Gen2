@@ -1,0 +1,6 @@
+(version 1)
+# Pads inside one fine-pitch footprint (IMU LGA, VSSOP, USB-C) sit 0.15 mm apart by the maker's land pattern.
+# JLC's 4-layer minimum is 0.09 mm, so allow that within a footprint while tracks keep the 0.2 mm class clearance.
+(rule "pad to pad in one footprint"
+  (constraint clearance (min 0.15mm))
+  (condition "A.Type == 'Pad' && B.Type == 'Pad' && A.Parent.Reference == B.Parent.Reference"))
