@@ -1,0 +1,732 @@
+<meta charset="utf-8">
+<title>OnSpeed Virtual Flight</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=B612:wght@400;700&family=B612+Mono:wght@400;700&family=Source+Sans+3:wght@400;600&display=swap">
+<style>
+/* Layout: a cockpit panel. Plane view and the M5 display side by side, controls or timeline under them, results below. */
+/* Single dark look on purpose: it mirrors the night-panel avionics the data comes from. */
+:root {
+  color-scheme: dark;
+  --panel: #0d1114;
+  --bezel: #171d22;
+  --line: #2a333b;
+  --ink: #dfe6ea;
+  --muted: #8b989f;
+  --accent: #5fd0e6;
+  --ok: #4fd27a;
+  --warn: #f2b33d;
+  --bad: #f05a4f;
+  --low: #5aa9ff;
+  --display: "B612", "Segoe UI", system-ui, sans-serif;
+  --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono: "B612 Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+html, body { background: var(--panel); color: var(--ink); }
+body { font-family: var(--body); font-size: 15px; line-height: 1.5; margin: 0; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 20px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 18px; }
+header h1 { font-family: var(--display); font-weight: 700; font-size: 1.6rem; margin: 0; letter-spacing: .02em; text-wrap: balance; }
+header p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; }
+.tag { font-family: var(--mono); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.modes { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.modes button { font-family: var(--display); font-size: .9rem; background: var(--bezel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+.modes button[aria-pressed="true"] { background: var(--accent); color: #031418; border-color: var(--accent); font-weight: 700; }
+.stage { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 860px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+.bezel { background: var(--bezel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: grid; gap: 10px; min-width: 0; align-content: start; }
+.bezel h2 { font-family: var(--display); font-size: .82rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin: 0; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+canvas { display: block; width: 100%; height: auto; border-radius: 6px; background: #000; }
+.readouts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 520px) { .readouts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ro { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; }
+.ro .k { font-family: var(--mono); font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.ro .v { font-family: var(--display); font-size: 1.25rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chip { display: inline-flex; align-items: center; gap: 8px; font-family: var(--display); font-size: 1rem; padding: 4px 12px; border-radius: 999px; border: 1px solid currentColor; }
+.chip .dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.tabs button, .transport button, .transport select, .tabs select, .ctl button { font-family: var(--display); font-size: .8rem; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+.tabs button[aria-pressed="true"], .ctl button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.transport { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.transport .play { background: var(--accent); color: #031418; border-color: var(--accent); font-weight: 700; min-width: 92px; }
+.transport .time { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); }
+.phase { font-family: var(--display); font-size: 1.05rem; }
+#scrub { width: 100%; accent-color: var(--accent); }
+.g5 { font-family: var(--mono); font-size: .72rem; color: var(--muted); overflow-x: auto; white-space: nowrap; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.g5 b { color: var(--ink); font-weight: 400; }
+.pan { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+.pan .bar { height: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; position: relative; }
+.pan .bar i { position: absolute; top: -3px; width: 4px; height: 12px; background: var(--accent); border-radius: 2px; left: 50%; }
+/* manual flying controls */
+.ctl { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 760px) { .ctl { grid-template-columns: auto auto; } .ctl .side { grid-column: 1 / -1; } }
+.stickbox { display: grid; gap: 6px; justify-items: center; }
+#stick { width: 210px; height: 210px; touch-action: none; cursor: grab; background: radial-gradient(circle at 50% 50%, #1d262d 0 60%, #12181c 61%); border: 1px solid var(--line); border-radius: 50%; }
+.lever { display: grid; gap: 6px; justify-items: center; }
+.lever input { writing-mode: vertical-lr; direction: rtl; height: 190px; width: 38px; accent-color: var(--warn); }
+.lab { font-family: var(--mono); font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; text-align: center; }
+.side { display: grid; gap: 12px; min-width: 0; }
+.row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.row input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+.kbd { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+.kbd b { color: var(--ink); font-weight: 400; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.results { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 860px) { .results { grid-template-columns: minmax(0, 1fr); } }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+td { padding: 6px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+td.s { font-family: var(--mono); font-size: .75rem; white-space: nowrap; }
+td.s.ok { color: var(--ok); } td.s.no { color: var(--bad); }
+td .d { color: var(--muted); font-size: .82rem; }
+ul.lim { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+ul.lim li::marker { color: var(--warn); }
+.note { color: var(--muted); font-size: .85rem; margin: 0; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; font-family: var(--mono); font-size: .7rem; color: var(--muted); }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
+#loading { color: var(--muted); font-family: var(--mono); }
+[hidden] { display: none !important; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="tag">ESP32-S3 · OnSpeed Gen2 logic ported</div>
+    <h1>OnSpeed on a virtual ESP32-S3</h1>
+    <p id="intro"></p>
+    <div class="modes" role="group" aria-label="Mode">
+      <button id="mAuto" aria-pressed="true">Automatic test flight</button>
+      <button id="mMan" aria-pressed="false">Fly it yourself</button>
+    </div>
+  </header>
+
+  <div id="loading">Loading the recorded flight…</div>
+
+  <section class="stage" id="stage" hidden>
+    <div class="bezel">
+      <h2><span>Aircraft · side view</span><span id="aoaLabel" class="tag"></span></h2>
+      <canvas id="plane" width="760" height="420" aria-label="Side view of the aircraft pitching with angle of attack"></canvas>
+      <div class="readouts">
+        <div class="ro"><div class="k">AOA board</div><div class="v" id="r-aoa">–</div></div>
+        <div class="ro"><div class="k">IAS kt</div><div class="v" id="r-ias">–</div></div>
+        <div class="ro"><div class="k">Pitch</div><div class="v" id="r-pitch">–</div></div>
+        <div class="ro"><div class="k">Flaps</div><div class="v" id="r-flaps">–</div></div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <span class="chip" id="tone"><span class="dot"></span><span id="toneTxt">Tones off</span></span>
+        <span class="tag" id="toneDetail"></span>
+      </div>
+      <div class="pan" title="3D audio: the tone pans with lateral G"><span>L</span><div class="bar"><i id="panDot"></i></div><span>R</span></div>
+    </div>
+
+    <div class="bezel">
+      <h2><span>M5Stack display · from the board's serial output</span></h2>
+      <div class="tabs" role="group" aria-label="Display page">
+        <button id="t0" aria-pressed="true" data-p="0">AOA indexer</button>
+        <button id="t1" aria-pressed="false" data-p="1">Attitude</button>
+        <button id="t3" aria-pressed="false" data-p="3">Energy</button>
+        <select id="style" aria-label="Display firmware style">
+          <option value="classic">Classic colours (as in your photo)</option>
+          <option value="v332">v3.3.2 colours (latest upstream)</option>
+        </select>
+      </div>
+      <canvas id="m5" width="320" height="240" style="image-rendering:pixelated" aria-label="M5Stack OnSpeed display"></canvas>
+      <div class="tag">Garmin G5 → board (RS-232 sentence)</div>
+      <div class="g5" id="g5">–</div>
+      <div class="tag">Board → display ("#1" sentence)</div>
+      <div class="g5" id="s1">–</div>
+      <div class="tag">MakerPlane EFIS ⇄ board (CAN-FiX frames, id#data)</div>
+      <div class="g5" id="cf">–</div>
+    </div>
+  </section>
+
+  <section class="bezel" id="man" hidden>
+    <h2><span>Flight controls</span><span class="tag" id="padState">Gamepad: none connected</span></h2>
+    <div class="ctl">
+      <div class="stickbox">
+        <canvas id="stick" width="420" height="420" aria-label="Control stick. Drag down to pull back and raise the angle of attack, sideways to roll."></canvas>
+        <div class="lab">Stick · drag down = pull back</div>
+      </div>
+      <div class="lever">
+        <input type="range" id="thr" min="0" max="100" value="55" aria-label="Throttle">
+        <div class="lab">Throttle <span id="thrV">55%</span></div>
+      </div>
+      <div class="side">
+        <div><div class="lab" style="text-align:left">Flaps</div>
+          <div class="row" role="group" aria-label="Flaps">
+            <button data-f="0" aria-pressed="true">0°</button><button data-f="20" aria-pressed="false">20°</button><button data-f="40" aria-pressed="false">40°</button>
+          </div></div>
+        <div><div class="lab" style="text-align:left">Rudder (makes slip for the 3D audio)</div>
+          <div class="row"><input type="range" id="rud" min="-100" max="100" value="0" aria-label="Rudder"><button id="rud0">Centre</button></div></div>
+        <div class="row">
+          <button id="trim">Trim at this AOA</button>
+          <button id="reset">Reset to cruise</button>
+          <label class="kbd"><input type="checkbox" id="mSnd" checked> Live audio</label>
+        </div>
+        <div class="kbd">Keys: <b>↑</b><b>↓</b> push / pull · <b>←</b><b>→</b> roll · <b>A</b><b>D</b> rudder · <b>W</b><b>S</b> throttle · <b>F</b> flaps · <b>T</b> trim. A gamepad works too: left stick flies, right stick X is rudder, triggers set throttle.</div>
+        <p class="note">This mode runs the same C++ core in your browser, compiled to WebAssembly: virtual sensor bytes, median and average filters, AOA curve, tone choice, tone synth, G5 parser and the "#1" display sentence. The flight model is a simple one so you can explore the bands; it is not RV-4 data.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="bezel" id="tl" hidden>
+    <div class="transport" id="transport">
+      <button class="play" id="play">▶ Play</button>
+      <label class="tag" for="speed">Speed</label>
+      <select id="speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select>
+      <label class="tag"><input type="checkbox" id="snd" checked> Board audio</label>
+      <span class="time" id="clock">0.0 s</span>
+      <span class="phase" id="phase"></span>
+    </div>
+    <canvas id="chart" width="1140" height="190" aria-label="AOA over time with the OnSpeed bands"></canvas>
+    <input type="range" id="scrub" min="0" max="160" step="0.02" value="0" aria-label="Flight time">
+    <div class="legend">
+      <span style="--c:#5aa9ff">Low-tone pulses (L/Dmax to OnSpeed)</span>
+      <span style="--c:#4fd27a">Solid tone (OnSpeed)</span>
+      <span style="--c:#f2b33d">High-tone pulses (slow)</span>
+      <span style="--c:#f05a4f">Stall warning, 20 pulses/s</span>
+      <span style="--c:#dfe6ea">AOA on the board</span>
+      <span style="--c:#8b989f">True AOA in the sim</span>
+    </div>
+    <p class="note" id="tlNote">Audio plays at 1× only. Sound starts after you press Play. Headphones show the 3D audio pan during the steep turn (96–107 s).</p>
+  </section>
+
+  <section class="results" id="res" hidden>
+    <div class="bezel">
+      <h2><span>Checks on the virtual board's output</span><span id="score" class="tag"></span></h2>
+      <table><tbody id="checks"></tbody></table>
+      <p class="note" id="metrics"></p>
+    </div>
+    <div class="bezel">
+      <h2><span>What the simulator cannot show</span></h2>
+      <ul class="lim">
+        <li>Real sensor behaviour: the pressure sensors, IMU and flap pot are simulated. The board parses the same bytes a Honeywell sensor sends, but I2C timing, noise and drift on real parts are untested.</li>
+        <li>Real audio hardware: the tone samples are real board output, but no I2S DAC or audio panel is attached. Levels into an intercom need a bench test.</li>
+        <li>Timing and CPU load: QEMU does not model ESP32-S3 speed, so whether everything fits in real time with Wi-Fi running is unproven.</li>
+        <li>AHRS: attitude comes from the simulated G5. The Gen2 Madgwick/Kalman code is not in this test.</li>
+        <li>Wi-Fi web UI, SD logging and the real M5Stack screen are not in this test. The display here redraws from the board's serial sentences with the M5 drawing rules.</li>
+        <li>Aerodynamics: the flight is scripted, and manual mode uses a simple flight model. The test proves the port matches Gen2 logic, not that Gen2's calibration fits your aircraft.</li>
+      </ul>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const INTRO = {
+  auto: 'Everything below was produced by the ported firmware running on an emulated ESP32-S3 (Espressif QEMU): AOA from the simulated pressure sensors, the tone it chose, the audio samples it rendered, the sentences it sent to the M5Stack display, and the Garmin G5 data it read. This page replays that recording.',
+  man: 'Fly it with the stick, throttle and flaps. Each 20 ms the page makes the raw sensor bytes for your flight and runs them through the OnSpeed core compiled to WebAssembly, the same source files that run on the ESP32-S3. The tone you hear is that core\'s own synth output.'
+};
+let T = null, audioBuf = null, actx = null, src = null;
+let mode = 'auto', t = 0, playing = false, last = 0, page = 0;
+const C = {low: '#5aa9ff', solid: '#4fd27a', high: '#f2b33d', stall: '#f05a4f', off: '#5a666d'};
+
+function toneKind(r) { // mode 1 pulse, 2 solid, 3 off
+  if (r.mode === 3) return 'off';
+  if (r.mode === 2) return 'solid';
+  if (!r.high) return 'low';
+  return r.pps >= 19.9 ? 'stall' : 'high';
+}
+const TXT = {off: 'Tones off', low: 'Low tone, pulsed', solid: 'Solid tone · OnSpeed', high: 'High tone, pulsed', stall: 'Stall warning'};
+
+function row(i) {
+  const a = T.rows[Math.max(0, Math.min(T.rows.length - 1, i))];
+  const o = {}; T.cols.forEach((c, k) => o[c] = a[k]); return o;
+}
+
+// ---- M5 display: parse like SerialRead.ino, draw like OnSpeed_M5_display.ino ----
+function m5parse(s) {
+  if (!s || s.length !== 78 || s.slice(0, 2) !== '#1') return null;
+  let crc = 0; for (let i = 0; i <= 75; i++) crc += s.charCodeAt(i);
+  if ((crc & 255) !== parseInt(s.slice(76, 78), 16)) return null;
+  const f = (a, b) => parseFloat(s.slice(a, b));
+  return {pitch: f(2, 6) / 10, roll: f(6, 11) / 10, ias: f(11, 15) / 10, palt: f(15, 21), latG: f(26, 29) / 100,
+    vertG: f(29, 32) / 10, pl: parseInt(s.slice(32, 34), 10), aoa: f(34, 38) / 10, vsi: f(38, 42) * 10, fpa: f(45, 49) / 10,
+    flaps: parseInt(s.slice(49, 52), 10), stall: f(52, 56) / 10, slow: f(56, 60) / 10, fast: f(60, 64) / 10, tonesOn: f(64, 68) / 10};
+}
+// M5Stack TFT_* colours (RGB565 expanded)
+const TFT = {grey: '#848484', dark: '#7b7d7b', dark2: '#404040', lightBlue: '#4242ff', yellow: '#ffff00', red: '#ff0000', green: '#00ff00', white: '#fff', black: '#000', lgrey: '#adaaad', orange: '#ffb600'};
+// SerialRead.ino: SmoothedAOA = 0.7*SmoothedAOA + 0.3*AOA, slip smoothing 0.5, once per received sentence
+let M = {aoa: 0, latG: 0, decel: 0, lastIas: null};
+function m5feed(d) {
+  M.aoa = M.aoa * 0.7 + 0.3 * d.aoa;
+  M.latG = M.latG * 0.5 + 0.5 * d.latG;
+  if (M.lastIas !== null) M.decel = 0.85 * M.decel + 0.15 * ((d.ias - M.lastIas) / 0.1);
+  M.lastIas = d.ias;
+}
+function map2int(x, a, b, c, d) { return Math.round((x - a) * (d - c) / (b - a) + c); }
+function mapAOA(aoa, A) {
+  if (aoa <= A[0]) return 192;
+  if (aoa <= A[2]) return map2int(aoa, A[0], A[2], 192, 148);
+  if (aoa <= A[3]) return map2int(aoa, A[2], A[3], 148, 115);
+  if (aoa <= A[4]) return map2int(aoa, A[3], A[4], 115, 78);
+  if (aoa <= A[7]) return map2int(aoa, A[4], A[7], 78, 1);
+  return 1;
+}
+// drawChevron(): a W/6 x H/2 bar rotated by +/- pi/8. Top pair forms a V, bottom pair an inverted V: together an X.
+function chevron(g, X0, Y0, W, H, side, top, col) {
+  const Px0 = -W / 12, Py0 = -H / 4, Px1 = W / 12, Py1 = H / 4;
+  const th = side * Math.PI / 8, c = Math.cos(th), s = Math.sin(th);
+  const ox = X0 + side * W / 4 * (top ? 1 : -1), oy = Y0 + (top ? -H / 4 : H / 4);
+  const pts = [[Px0, Py0], [Px1, Py0], [Px1, Py1], [Px0, Py1]].map(([x, y]) => [x * c - y * s + ox, x * s + y * c + oy]);
+  g.fillStyle = col; g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.fill();
+}
+// drawSlip(): green ball, Slip = int(SmoothedLateralG*34/0.04) clamped to +/-99, white tick bars over it
+function drawSlip(g, X0, Y0, W, H, latG, flash, aoa, A) {
+  const cx = X0 + W / 2, cy = Y0 + H / 2;
+  const slip = Math.max(-99, Math.min(99, Math.trunc(latG * 34 / 0.04)));
+  let col = TFT.green;
+  if (Math.abs(slip) >= 30 && aoa >= A[7]) col = flash ? TFT.black : TFT.red;
+  g.fillStyle = col; g.beginPath(); g.arc(cx + Math.trunc(slip * (W - H - 1) / 99 / 2), cy, H / 2 - 1, 0, 7); g.fill();
+  g.fillStyle = TFT.black; g.fillRect(cx - H / 2 - 9, Y0, 10, H); g.fillRect(cx + H / 2, Y0, 10, H);
+  g.fillStyle = TFT.white; g.fillRect(cx - H / 2 - 7, Y0, 6, H); g.fillRect(cx + H / 2 + 2, Y0, 6, H);
+}
+function drawM5(d, flash) {
+  const g = $('m5').getContext('2d');
+  g.fillStyle = TFT.black; g.fillRect(0, 0, 320, 240);
+  if (!d) { g.fillStyle = TFT.white; g.font = '700 22px B612'; g.textAlign = 'center'; g.fillText('NO DATA', 160, 128); return; }
+  const A = [0.0001, d.tonesOn - 0.1, d.tonesOn, d.fast, d.slow, d.slow + 0.1, d.stall - 0.1, d.stall];
+  const aoa = M.aoa, classic = $('style').value === 'classic';
+  g.textBaseline = 'alphabetic';
+  if (page === 0) {
+    const W = 102, H = 192, X0 = 160, Y0 = H / 2, be = Math.trunc(H * 8 / 200);
+    let top, bot;
+    if (classic) { // v3.2.3 drawAOA()
+      top = aoa > A[4] ? TFT.red : TFT.dark;
+      if (flash && aoa >= A[7]) top = TFT.dark;
+      bot = aoa >= A[1] ? TFT.orange : TFT.dark;
+    } else { // v3.3.2 drawAOA()
+      const mid = A[4] + (A[7] - A[4]) / 2;
+      top = TFT.dark2;
+      if (aoa > A[4] && aoa <= mid) top = TFT.yellow; else if (aoa > mid && aoa <= A[7]) top = TFT.red; else if (aoa > A[7] && !flash) top = TFT.red;
+      bot = aoa >= A[1] && aoa < A[4] ? TFT.lightBlue : TFT.dark2;
+    }
+    chevron(g, X0, Y0, W, H, 1, true, top); chevron(g, X0, Y0, W, H, -1, true, top);
+    chevron(g, X0, Y0, W, H, 1, false, bot); chevron(g, X0, Y0, W, H, -1, false, bot);
+    g.fillStyle = TFT.black; g.beginPath(); g.arc(X0, Y0, be + H / 12, 0, 7); g.fill();
+    if (classic) {
+      g.fillStyle = aoa >= A[3] ? TFT.green : TFT.dark; g.beginPath(); g.arc(X0, Y0, be + H / 16, 0, 7); g.fill();
+      g.fillStyle = TFT.black; g.beginPath(); g.arc(X0, Y0, be + 5, 0, 7); g.fill();
+      g.fillRect(X0 - W / 3, Y0 - H / 48, 2 * W / 3, H / 24);
+      g.fillStyle = aoa >= A[3] && aoa <= A[4] ? TFT.green : TFT.black; g.beginPath(); g.arc(X0, Y0, be + 2, 0, 7); g.fill();
+    } else {
+      const rng = A[4] - A[3], R = be + H / 16; g.lineWidth = 8;
+      g.strokeStyle = aoa >= A[3] && aoa <= A[4] - rng * .25 ? TFT.green : TFT.dark2; g.beginPath(); g.arc(X0, Y0, R, 0, Math.PI); g.stroke();
+      g.strokeStyle = aoa >= A[3] + rng * .25 && aoa <= A[4] ? TFT.green : TFT.dark2; g.beginPath(); g.arc(X0, Y0, R, Math.PI, 2 * Math.PI); g.stroke();
+      g.fillStyle = TFT.black; g.fillRect(X0 - W / 3, Y0 - H / 48, 2 * W / 3, H / 24);
+      g.fillStyle = aoa >= A[3] + rng * .25 && aoa <= A[4] - rng * .25 ? TFT.green : TFT.dark2; g.beginPath(); g.arc(X0, Y0, be + 2, 0, 7); g.fill();
+    }
+    const iy = mapAOA(aoa, A); g.fillStyle = TFT.white; g.fillRect(X0 - W / 2, iy, W, H / 24);
+    g.strokeStyle = TFT.black; g.lineWidth = 1; g.strokeRect(X0 - W / 2 + .5, iy + .5, W - 1, H / 24 - 1);
+    // "marker dots for maximum climb rate", fixed at HEIGHT - 39% either side of the indexer
+    [X0 - W / 2, X0 + W / 2 - 1].forEach(x => { g.fillStyle = TFT.black; g.beginPath(); g.arc(x, 147, H / 24, 0, 7); g.fill(); g.fillStyle = TFT.white; g.beginPath(); g.arc(x, 147, H / 32, 0, 7); g.fill(); });
+    g.font = '700 26px B612'; g.textAlign = 'center'; g.lineWidth = 5; g.strokeStyle = TFT.black; g.fillStyle = TFT.white;
+    const pl = String(d.pl).padStart(2, '0'); g.strokeText(pl, X0, 27); g.fillText(pl, X0, 27);
+    g.textAlign = 'left'; g.font = '24px B612'; g.fillStyle = TFT.green; g.fillText('IAS', 5, 90); g.fillText('G', 288, 90);
+    g.font = '700 26px B612'; g.fillStyle = TFT.white; g.fillText(String(Math.trunc(d.ias)), 7, 130);
+    g.textAlign = 'right'; g.fillText(d.vertG.toFixed(1), 310, 128);
+    const cx = 23, cy = 204, r = 16, fr = d.flaps * Math.PI / 180;
+    g.fillStyle = TFT.grey; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill();
+    g.beginPath(); g.moveTo(cx + Math.sin(fr) * r, cy - Math.cos(fr) * r); g.lineTo(cx - Math.sin(fr) * r, cy + Math.cos(fr) * r); g.lineTo(cx + Math.cos(fr) * (r + 33), cy + Math.sin(fr) * (r + 33)); g.fill();
+    g.fillStyle = TFT.white; g.font = '14px B612'; g.textAlign = 'center'; g.fillText(String(d.flaps), cx, cy + 5);
+    drawSlip(g, 80, 215, 160, 20, M.latG, flash, aoa, A);
+  } else if (page === 1) {
+    g.save(); g.translate(160, 120); g.rotate(-d.roll * Math.PI / 180);
+    const py = d.pitch * 4;
+    g.fillStyle = '#2f7fd6'; g.fillRect(-400, -400 + py, 800, 400); g.fillStyle = '#8a5a2b'; g.fillRect(-400, py, 800, 400);
+    g.strokeStyle = TFT.white; g.lineWidth = 2; g.beginPath(); g.moveTo(-400, py); g.lineTo(400, py); g.stroke();
+    g.font = '11px B612'; g.fillStyle = TFT.white; g.textAlign = 'right';
+    for (let p = -30; p <= 30; p += 5) { if (!p) continue; const y = py - p * 4, w = p % 10 ? 14 : 28; g.beginPath(); g.moveTo(-w, y); g.lineTo(w, y); g.stroke(); if (!(p % 10)) g.fillText(String(Math.abs(p)), -w - 4, y + 4); }
+    const fy = py - d.fpa * 4; g.strokeStyle = TFT.green; g.beginPath(); g.arc(0, fy, 7, 0, 7); g.moveTo(-17, fy); g.lineTo(-7, fy); g.moveTo(7, fy); g.lineTo(17, fy); g.moveTo(0, fy - 7); g.lineTo(0, fy - 13); g.stroke();
+    g.restore();
+    g.strokeStyle = TFT.yellow; g.lineWidth = 4; g.beginPath(); g.moveTo(110, 120); g.lineTo(145, 120); g.lineTo(152, 128); g.moveTo(210, 120); g.lineTo(175, 120); g.lineTo(168, 128); g.stroke();
+    g.font = '15px B612'; g.textAlign = 'left'; g.fillStyle = TFT.lgrey; g.fillText('IAS', 5, 60); g.fillText('G', 5, 230); g.textAlign = 'right'; g.fillText('ALT', 312, 60); g.fillText('AOA', 312, 230);
+    g.font = '700 24px B612'; g.textAlign = 'left'; g.fillStyle = TFT.white; g.fillText(String(Math.trunc(d.ias)), 5, 32); g.fillText(d.vertG.toFixed(1), 5, 205);
+    g.textAlign = 'right'; g.fillText(String(Math.round(d.palt)), 310, 32); g.fillText(String(d.pl).padStart(2, '0'), 310, 205);
+    drawSlip(g, 80, 214, 160, 20, M.latG, flash, aoa, A);
+  } else {
+    g.fillStyle = TFT.red; g.fillRect(109, 1, 102, 210); g.fillStyle = TFT.green; g.fillRect(109, 87, 102, 36);
+    let di = Math.round(35.143 * M.decel + 141.48 - 3.5); di = Math.max(2, Math.min(205, di));
+    g.fillStyle = TFT.white; g.fillRect(109, di, 102, 7); g.strokeStyle = TFT.black; g.lineWidth = 1; g.strokeRect(109, di, 102, 7);
+    g.font = '12px B612'; g.fillStyle = TFT.white; g.textAlign = 'right';
+    [['-1', 106], ['-2', 72], ['-3', 36], ['0', 141], ['1', 177]].forEach(([s, y]) => { g.fillText(s, 95, y + 4); g.strokeStyle = TFT.lgrey; g.beginPath(); g.moveTo(99, y); g.lineTo(107, y); g.stroke(); });
+    g.font = '24px B612'; g.textAlign = 'left'; g.fillStyle = TFT.green; g.fillText('IAS', 5, 90); g.textAlign = 'right'; g.fillText('Kt/s', 305, 80);
+    g.font = '700 26px B612'; g.fillStyle = TFT.white; g.textAlign = 'left'; g.fillText(String(Math.trunc(d.ias)), 7, 130);
+    g.textAlign = 'right'; g.fillText((M.decel >= 0 ? '+' : '') + M.decel.toFixed(1), 305, 128);
+    drawSlip(g, 80, 215, 160, 20, M.latG, flash, aoa, A);
+  }
+}
+
+// ---- side view of the aircraft ----
+function drawPlane(r) {
+  const cv = $('plane'), g = cv.getContext('2d'), W = cv.width, H = cv.height;
+  const grd = g.createLinearGradient(0, 0, 0, H); grd.addColorStop(0, '#0e2236'); grd.addColorStop(1, '#2a4a68');
+  g.fillStyle = grd; g.fillRect(0, 0, W, H);
+  const alt = Math.max(0, r.palt - 1000), gy = H - 30 + Math.min(alt / 3, 400);
+  if (gy < H) { g.fillStyle = '#2b2419'; g.fillRect(0, gy, W, H - gy); g.fillStyle = '#4a4a4a'; g.fillRect(0, gy, W, 6); }
+  const gam = (r.pitch - r.aoaTrue) * Math.PI / 180;
+  g.save(); g.translate(W / 2, H / 2); g.rotate(-gam);
+  g.strokeStyle = 'rgba(180,220,240,.18)'; g.lineWidth = 2;
+  const off = (performance.now() / 1000 * r.ias * 4) % 120;
+  for (let y = -220; y <= 220; y += 44) for (let x = -560; x < 560; x += 120) { g.beginPath(); g.moveTo(x - off + 120, y); g.lineTo(x - off + 160, y); g.stroke(); }
+  g.strokeStyle = 'rgba(95,208,230,.9)'; g.setLineDash([8, 6]); g.lineWidth = 2; g.beginPath(); g.moveTo(-330, 0); g.lineTo(330, 0); g.stroke(); g.setLineDash([]);
+  g.fillStyle = 'rgba(95,208,230,.95)'; g.font = '13px B612'; g.fillText('flight path', 220, -8);
+  g.beginPath(); g.moveTo(-250, 46); g.lineTo(-180, 46); g.stroke(); g.beginPath(); g.moveTo(-250, 46); g.lineTo(-240, 40); g.lineTo(-240, 52); g.fill();
+  g.fillText('relative wind', -250, 68);
+  g.restore();
+  g.save(); g.translate(W / 2, H / 2); g.rotate(-r.pitch * Math.PI / 180);
+  g.scale(1, Math.max(0.55, Math.cos(r.bank * Math.PI / 180)));
+  const k = C[toneKind(r)];
+  g.strokeStyle = k; g.lineWidth = 2; g.beginPath(); g.moveTo(-300, 0); g.lineTo(300, 0); g.stroke();
+  g.fillStyle = '#cfd8dc'; g.strokeStyle = '#0b0f12'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(150, -6); g.quadraticCurveTo(160, 2, 150, 10); g.lineTo(70, 16); g.lineTo(-150, 6); g.lineTo(-190, 2); g.lineTo(-190, -6); g.lineTo(-150, -10); g.lineTo(60, -14); g.closePath(); g.fill(); g.stroke();
+  g.fillStyle = '#7fb6d6'; g.beginPath(); g.moveTo(70, -14); g.quadraticCurveTo(20, -42, -40, -16); g.closePath(); g.fill(); g.stroke();
+  g.fillStyle = '#cfd8dc'; g.beginPath(); g.moveTo(-150, -9); g.lineTo(-190, -52); g.lineTo(-205, -52); g.lineTo(-196, -6); g.closePath(); g.fill(); g.stroke();
+  g.beginPath(); g.moveTo(-170, 2); g.lineTo(-210, 4); g.lineTo(-206, 9); g.lineTo(-165, 7); g.fill(); g.stroke();
+  g.fillStyle = '#b0bec5'; g.beginPath(); g.moveTo(70, 10); g.quadraticCurveTo(76, 18, 64, 20); g.lineTo(-10, 19); g.lineTo(-10, 12); g.closePath(); g.fill(); g.stroke();
+  g.save(); g.translate(-10, 15); g.rotate(r.flaps * Math.PI / 180 * 0.8); g.fillRect(-24, -3, 24, 6); g.strokeRect(-24, -3, 24, 6); g.restore();
+  g.strokeStyle = '#0b0f12'; g.beginPath(); g.moveTo(80, 14); g.lineTo(96, 44); g.stroke(); g.fillStyle = '#222'; g.beginPath(); g.arc(96, 46, 9, 0, 7); g.fill();
+  g.strokeStyle = 'rgba(220,230,235,.45)'; g.lineWidth = 3; g.beginPath(); g.ellipse(160, 2, 4, 44, 0, 0, 7); g.stroke();
+  g.strokeStyle = '#f2b33d'; g.lineWidth = 2; g.beginPath(); g.moveTo(40, 20); g.lineTo(84, 22); g.stroke();
+  g.restore();
+  g.save(); g.translate(W / 2, H / 2);
+  const a0 = gam, a1 = r.pitch * Math.PI / 180;
+  g.strokeStyle = k; g.lineWidth = 3; g.beginPath(); g.arc(0, 0, 120, -Math.max(a0, a1), -Math.min(a0, a1)); g.stroke();
+  g.fillStyle = k; g.font = '700 20px B612'; g.fillText('α ' + r.aoa.toFixed(1) + '°', 128, -((a0 + a1) / 2) * 120 - 4);
+  g.restore();
+  g.fillStyle = 'rgba(223,230,234,.75)'; g.font = '12px B612Mono, B612 Mono, monospace';
+  g.fillText(`pitch ${r.pitch.toFixed(1)}°  flight path ${(r.pitch - r.aoaTrue).toFixed(1)}°  bank ${r.bank.toFixed(0)}°  ${r.vertG.toFixed(1)} g  alt ${Math.round(r.palt)} ft`, 14, H - 12);
+}
+
+// ---- AOA chart: whole recorded flight, or the last 30 s of manual flying ----
+let chartBase = null;
+function chartAxes(g, W, H, y) {
+  g.fillStyle = '#0d1114'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = '#2a333b'; g.fillStyle = '#8b989f'; g.font = '11px B612 Mono, monospace'; g.lineWidth = 1;
+  for (let a = 0; a <= 20; a += 5) { g.beginPath(); g.moveTo(34, y(a)); g.lineTo(W - 10, y(a)); g.stroke(); g.fillText(a + '°', 4, y(a) + 4); }
+}
+function drawRows(g, rows, x, y, H, W) {
+  const n = rows.length;
+  for (let i = 0; i < n; i += 2) { const r = rows[i]; const k = toneKind(r); g.fillStyle = C[k]; g.globalAlpha = k === 'off' ? .25 : .85; g.fillRect(x(i), H - 12, (W - 44) / Math.max(n, 1) * 2 + 1, 10); }
+  g.globalAlpha = 1;
+  g.save(); g.beginPath(); g.rect(34, 16, W - 44, H - 34); g.clip();
+  for (const [key, col, w] of [['aoaTrue', '#8b989f', 1], ['aoa', '#dfe6ea', 1.6]]) {
+    g.strokeStyle = col; g.lineWidth = w; g.beginPath();
+    for (let i = 0; i < n; i += 2) { const v = rows[i][key]; i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v)); }
+    g.stroke();
+  }
+  g.restore();
+}
+const chartY = H => a => H - 18 - (a + 2) / 24 * (H - 34);
+function drawChartBase() {
+  const cv = $('chart'), g = cv.getContext('2d'), W = cv.width, H = cv.height, n = T.rows.length, y = chartY(H);
+  chartAxes(g, W, H, y);
+  for (let s = 20; s <= 140; s += 20) g.fillText(s + 's', 34 + s / 0.02 / (n - 1) * (W - 44) - 8, 12);
+  const rows = []; for (let i = 0; i < n; i++) rows.push(row(i));
+  drawRows(g, rows, i => 34 + i / (n - 1) * (W - 44), y, H, W);
+  chartBase = g.getImageData(0, 0, W, H);
+}
+function drawChartCursor() {
+  const cv = $('chart'), g = cv.getContext('2d'), W = cv.width, H = cv.height;
+  g.putImageData(chartBase, 0, 0);
+  const xi = 34 + (t / 0.02) / (T.rows.length - 1) * (W - 44);
+  g.strokeStyle = '#5fd0e6'; g.lineWidth = 2; g.beginPath(); g.moveTo(xi, 16); g.lineTo(xi, H); g.stroke();
+}
+function drawLiveChart() {
+  const cv = $('chart'), g = cv.getContext('2d'), W = cv.width, H = cv.height, y = chartY(H), N = 1500;
+  chartAxes(g, W, H, y);
+  for (let s = -30; s <= 0; s += 5) g.fillText(s + 's', 34 + (s + 30) / 30 * (W - 44) - 10, 12);
+  const rows = L.hist, off = N - rows.length;
+  drawRows(g, rows, i => 34 + (i + off) / (N - 1) * (W - 44), y, H, W);
+  // OnSpeed band for the current flaps
+  if (L.sp) {
+    g.fillStyle = 'rgba(79,210,122,.12)'; g.fillRect(34, y(L.sp[2]), W - 44, y(L.sp[1]) - y(L.sp[2]));
+    g.strokeStyle = 'rgba(240,90,79,.6)'; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(34, y(L.sp[3])); g.lineTo(W - 10, y(L.sp[3])); g.stroke(); g.setLineDash([]);
+  }
+}
+
+function phaseAt(ms) { let p = ''; for (const ph of T.phases) if (ph.t <= ms) p = ph.text; return p; }
+
+function show(r, disp, g5txt, cf) {
+  const d = m5parse(disp);
+  drawPlane(r);
+  drawM5(d, Math.floor(performance.now() / 250) % 2 === 0);
+  $('r-aoa').textContent = r.aoa.toFixed(1) + '°';
+  $('r-ias').textContent = r.ias.toFixed(0);
+  $('r-pitch').textContent = r.pitch.toFixed(1) + '°';
+  $('r-flaps').textContent = r.flaps + '°';
+  const k = toneKind(r);
+  $('tone').style.color = C[k]; $('toneTxt').textContent = TXT[k];
+  $('toneDetail').textContent = k === 'off' ? (r.ias <= 25 ? 'muted under 25 kt' : '') : k === 'solid' ? '400 Hz continuous' : `${r.high ? 1600 : 400} Hz · ${r.pps.toFixed(1)} pulses/s`;
+  // 3D audio pan, same curve as 3DAudio.ino (smoothing left out)
+  const cg = Math.min(1, Math.max(0, -92.822 * r.latG * r.latG + 20.025 * Math.abs(r.latG))) * Math.sign(r.latG);
+  $('panDot').style.left = `calc(${50 + cg * 50}% - 2px)`;
+  $('aoaLabel').textContent = `true α ${r.aoaTrue.toFixed(1)}° · board ${r.aoa.toFixed(1)}°`;
+  $('g5').innerHTML = g5txt ? `<b>${g5txt}</b>` : '–';
+  $('s1').innerHTML = disp ? `<b>${disp}</b>` : '–';
+  // board frames (node 0x50: AOA 0x182, IAS 0x183, status 0x730) in white, the EFIS's own (node 0x91) dimmed
+  $('cf').innerHTML = cf ? cf.trim().split(' ').map(f => f.slice(4, 6) === '50' || f.startsWith('730') ? `<b>${f}</b>` : f).join(' ') : '–';
+}
+
+// ================= automatic mode: replay of the QEMU recording =================
+let lastDi = -1;
+function renderAuto() {
+  const i = Math.round(t / 0.02), r = row(i);
+  const di = Math.min(T.display.length - 1, Math.floor(i / 5));
+  if (di !== lastDi) { const d = m5parse(T.display[di]); if (d) { if (Math.abs(di - lastDi) > 1) { M.aoa = d.aoa; M.latG = d.latG; M.lastIas = null; } m5feed(d); } lastDi = di; }
+  show(r, T.display[di], T.g5[di], T.can ? T.can[di] : '');
+  drawChartCursor();
+  $('clock').textContent = t.toFixed(1) + ' s';
+  $('phase').textContent = phaseAt(i * 20);
+  $('scrub').value = t;
+}
+function speed() { return parseFloat($('speed').value); }
+function stopAudio() { if (src) { try { src.stop(); } catch (e) {} src = null; } }
+function startAudio() {
+  stopAudio();
+  if (!audioBuf || !$('snd').checked || speed() !== 1 || mode !== 'auto') return;
+  src = actx.createBufferSource(); src.buffer = audioBuf; src.connect(actx.destination); src.start(0, t);
+}
+async function ensureCtx() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } }
+  if (actx.state === 'suspended') { try { await actx.resume(); } catch (e) {} }
+  return actx;
+}
+async function ensureAudio() {
+  if (!(await ensureCtx()) || audioBuf) return;
+  try { audioBuf = await actx.decodeAudioData(await (await fetch('board_audio.wav')).arrayBuffer()); }
+  catch (e) { $('snd').checked = false; $('snd').disabled = true; }
+}
+async function setPlaying(p) {
+  playing = p; $('play').textContent = p ? '❚❚ Pause' : '▶ Play';
+  if (p) { await ensureAudio(); last = performance.now(); startAudio(); } else stopAudio();
+}
+
+// ================= manual mode: live core in WebAssembly =================
+let W5 = null;  // wasm exports
+const L = {hist: [], sp: null, k: 0, sec: 0, disp: '', g5: '', next: 0, acc: 0};
+const IN = {x: 0, y: 0, thr: 0.55, rud: 0, flaps: 0, trim: 2.3, dragging: false, kx: 0, ky: 0};
+const FM = {};
+function resetFlight() {
+  Object.assign(FM, {V: 120, gam: 0, phi: 0, alt: 3000, hdg: 0, aoa: 2.3, flapPos: 0, onGround: false, n: 1, latG: 0, buffet: 0});
+  IN.trim = 2.3; IN.thr = 0.55; $('thr').value = 55; $('thrV').textContent = '55%';
+  setFlaps(0); L.hist = [];
+}
+// Simple point-mass model, tuned so the OnSpeed bands sit at RV-4-like speeds (stall warning ~58 kt clean).
+function flaps(f) { // lift-curve parameters blended across flap travel, matching the scripted model in flight_model.cpp
+  const u = Math.min(f, 20) / 20, w = Math.max(0, f - 20) / 20;
+  return {aoa0: -2 - 2 * u - 1 * w, k: 249.5 - 6.5 * u - 3 * w, stall: 19 - 0.5 * u - 2 * w, cd: 1 + 0.5 * u + 0.9 * w};
+}
+function stepFlight(dt) {
+  const f = FM.flapPos, P = flaps(f);
+  FM.flapPos += Math.sign(IN.flaps - f) * Math.min(Math.abs(IN.flaps - f), 6 * dt);
+  // stick: centre holds the trim AOA, full back = 24 deg, full forward = -6 deg
+  const y = IN.y, cmd = IN.trim + (y > 0 ? y * (24 - IN.trim) : y * (IN.trim + 6));
+  // a pilot's hand damps the phugoid: ease the AOA off while the flight path is still swinging
+  const damp = Math.max(-4, Math.min(4, (FM.gdot || 0) * 180 / Math.PI * 0.9));
+  FM.aoa += (cmd - damp - FM.aoa) * Math.min(1, dt / 0.35);
+  if (FM.onGround) FM.aoa = Math.min(FM.aoa, 12);
+  FM.phi += IN.x * 55 * dt; FM.phi = Math.max(-75, Math.min(75, FM.phi));
+  if (FM.onGround) FM.phi = 0;
+  let cl = FM.aoa - P.aoa0;
+  if (FM.aoa > P.stall) cl = (P.stall - P.aoa0) - (FM.aoa - P.stall) * 1.2; // past the stall the lift falls away
+  cl = Math.max(-8, cl);
+  const V = Math.max(FM.V, 1);
+  let n = (V / P.k) ** 2 * cl;
+  FM.buffet = FM.aoa > P.stall - 1 ? (Math.random() - 0.5) * 0.25 : 0;
+  n = Math.max(-2, Math.min(6, n + FM.buffet));
+  if (FM.onGround && n < 1) n = Math.max(n, 0); // wheels carry the rest
+  const dw = 8e-6 * V * V * P.cd + 312 * n * n / (V * V) + (FM.aoa > P.stall ? 0.012 * (FM.aoa - P.stall) : 0);
+  const tw = IN.thr * Math.min(0.35, 30 / V);
+  const fric = FM.onGround ? 0.03 + (IN.thr < 0.05 ? 0.12 : 0) : 0;
+  FM.V += 19.07 * (tw - dw - Math.sin(FM.gam) - fric) * dt;
+  FM.V = Math.max(0, Math.min(230, FM.V));
+  const Vms = Math.max(FM.V * 0.5144, 5);
+  FM.gdot = FM.onGround ? 0 : 9.81 / Vms * (n * Math.cos(FM.phi * Math.PI / 180) - Math.cos(FM.gam));
+  FM.gam += FM.gdot * dt;
+  FM.gam = Math.max(-1.4, Math.min(1.4, FM.gam));
+  FM.alt += Vms * Math.sin(FM.gam) * 3.281 * dt;
+  if (FM.alt <= 1000) { FM.alt = 1000; if (FM.gam < 0) { FM.gam = 0; FM.onGround = true; } }
+  if (FM.onGround && n > 1.02) { FM.onGround = false; FM.gam = 0.01; }
+  if (Vms > 15) FM.hdg = (FM.hdg + 1091 * Math.tan(FM.phi * Math.PI / 180) / FM.V * dt + 360) % 360;
+  // slip: rudder plus a little adverse yaw from the roll input
+  FM.latG = 0.09 * IN.rud - 0.015 * IN.x;
+  FM.n = n;
+}
+function liveTick() {
+  const dt = 0.02;
+  stepFlight(dt);
+  const pot = (() => { const p = [0, 1, 2].map(i => W5.os_flap_pot(i)), f = FM.flapPos; return f <= 20 ? p[0] + (p[1] - p[0]) * f / 20 : p[1] + (p[2] - p[1]) * (f - 20) / 20; })();
+  const gamD = FM.gam * 180 / Math.PI, pitch = FM.onGround ? FM.aoa : FM.aoa * Math.cos(FM.phi * Math.PI / 180) + gamD;
+  W5.os_fly(FM.V, FM.aoa, pot, FM.alt, FM.latG);
+  const vsi = FM.V * 0.5144 * Math.sin(FM.gam) * 196.85;
+  if (L.k % 5 === 0) { // 10 Hz: G5 sentence in, display sentence out, like sensorTask
+    const sec = Math.floor(L.k / 50);
+    L.g5 = cstr(W5.os_g5(sec, pitch, FM.phi, Math.round(FM.hdg), FM.V, Math.round(FM.alt), FM.latG, FM.n, Math.round(vsi)));
+    L.disp = cstr(W5.os_display(gamD));
+    L.cf = cstr(W5.os_canfix(L.k * 20, pitch, FM.phi, FM.V, Math.round(FM.alt), Math.round(FM.hdg), Math.round(vsi), FM.latG, FM.n));
+    const d = m5parse(L.disp); if (d) m5feed(d);
+  }
+  L.k++;
+  const r = {aoaTrue: FM.aoa, aoa: W5.os_aoa(), ias: W5.os_ias(), pitch, bank: FM.phi, latG: FM.latG, vertG: FM.n, palt: FM.alt,
+    mode: W5.os_tone_mode(), high: W5.os_high_tone(), pps: W5.os_pps(), flaps: W5.os_flaps(), pl: W5.os_percent_lift()};
+  L.sp = [0, 1, 2, 3].map(i => W5.os_setpoint(i));
+  L.hist.push(r); if (L.hist.length > 1500) L.hist.shift();
+  L.cur = r;
+  // the core's own synth: 441 stereo frames per 20 ms tick, scheduled ahead on Web Audio
+  if (actx && $('mSnd').checked && actx.state === 'running') {
+    const p = W5.os_render(441) >> 1, pcm = new Int16Array(W5.memory.buffer, p * 2, 882);
+    const b = actx.createBuffer(2, 441, 22050), l = b.getChannelData(0), rr = b.getChannelData(1);
+    for (let i = 0; i < 441; i++) { l[i] = pcm[2 * i] / 32768; rr[i] = pcm[2 * i + 1] / 32768; }
+    const s = actx.createBufferSource(); s.buffer = b; s.connect(actx.destination);
+    if (L.next < actx.currentTime + 0.02 || L.next > actx.currentTime + 0.3) L.next = actx.currentTime + 0.06;
+    s.start(L.next); L.next += 441 / 22050;
+  } else W5.os_render(441);
+}
+function cstr(p) { const u = new Uint8Array(W5.memory.buffer); let s = ''; while (u[p]) s += String.fromCharCode(u[p++]); return s; }
+async function loadWasm() {
+  if (W5) return true;
+  try {
+    const {instance} = await WebAssembly.instantiate(await (await fetch('onspeed_core.wasm')).arrayBuffer(), {});
+    W5 = instance.exports; if (W5._initialize) W5._initialize(); W5.os_init(22050); W5.os_volume(1);
+    return true;
+  } catch (e) { return false; }
+}
+function readPad() {
+  const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+  if (!pads.length) { $('padState').textContent = 'Gamepad: none connected'; return false; }
+  const p = pads[0], dz = v => Math.abs(v) < 0.08 ? 0 : v;
+  $('padState').textContent = 'Gamepad: ' + p.id.slice(0, 40);
+  const ax = dz(p.axes[0] || 0), ay = dz(p.axes[1] || 0), rx = dz(p.axes[2] || 0);
+  if (ax || ay) { IN.x = ax; IN.y = ay; }
+  if (rx) setRud(rx);
+  const up = p.buttons[7] ? p.buttons[7].value : 0, dn = p.buttons[6] ? p.buttons[6].value : 0;
+  if (up || dn) setThr(IN.thr + (up - dn) * 0.01);
+  if (p.buttons[0] && p.buttons[0].pressed && !IN.padA) cycleFlaps();
+  IN.padA = p.buttons[0] && p.buttons[0].pressed;
+  return !!(ax || ay);
+}
+function setThr(v) { IN.thr = Math.max(0, Math.min(1, v)); $('thr').value = Math.round(IN.thr * 100); $('thrV').textContent = Math.round(IN.thr * 100) + '%'; }
+function setRud(v) { IN.rud = Math.max(-1, Math.min(1, v)); $('rud').value = Math.round(IN.rud * 100); }
+function setFlaps(f) { IN.flaps = f; document.querySelectorAll('[data-f]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.f === f))); }
+function cycleFlaps() { setFlaps(IN.flaps === 0 ? 20 : IN.flaps === 20 ? 40 : 0); }
+function drawStick() {
+  const cv = $('stick'), g = cv.getContext('2d'), S = cv.width, c = S / 2;
+  g.clearRect(0, 0, S, S);
+  g.strokeStyle = '#2a333b'; g.lineWidth = 2; g.beginPath(); g.moveTo(c, 20); g.lineTo(c, S - 20); g.moveTo(20, c); g.lineTo(S - 20, c); g.stroke();
+  g.fillStyle = '#8b989f'; g.font = '22px B612'; g.textAlign = 'center';
+  g.fillText('PUSH', c, 46); g.fillText('PULL', c, S - 28);
+  const kx = c + IN.x * (c - 50), ky = c + IN.y * (c - 50);
+  g.strokeStyle = '#5fd0e6'; g.lineWidth = 10; g.beginPath(); g.moveTo(c, c); g.lineTo(kx, ky); g.stroke();
+  g.fillStyle = '#5fd0e6'; g.beginPath(); g.arc(kx, ky, 34, 0, 7); g.fill();
+  g.fillStyle = '#031418'; g.beginPath(); g.arc(kx, ky, 12, 0, 7); g.fill();
+}
+const KEYS = {};
+function readKeys(dt) {
+  const ky = (KEYS.ArrowDown ? 1 : 0) - (KEYS.ArrowUp ? 1 : 0), kx = (KEYS.ArrowRight ? 1 : 0) - (KEYS.ArrowLeft ? 1 : 0);
+  if (ky) IN.ky = Math.max(-1, Math.min(1, IN.ky + ky * dt * 1.2)); else IN.ky *= Math.max(0, 1 - dt * 3);
+  if (kx) IN.kx = Math.max(-1, Math.min(1, IN.kx + kx * dt * 2)); else IN.kx *= Math.max(0, 1 - dt * 6);
+  if (KEYS.KeyW) setThr(IN.thr + dt * 0.4); if (KEYS.KeyS) setThr(IN.thr - dt * 0.4);
+  if (KEYS.KeyD) setRud(IN.rud + dt * 1.5); if (KEYS.KeyA) setRud(IN.rud - dt * 1.5);
+  return Math.abs(IN.ky) > 0.01 || Math.abs(IN.kx) > 0.01;
+}
+function renderMan(now) {
+  const dt = Math.min(0.25, (now - last) / 1000); last = now;
+  if (!IN.dragging) {
+    const k = readKeys(dt), p = readPad();
+    if (k) { IN.x = IN.kx; IN.y = IN.ky; } else if (!p) { IN.x *= Math.max(0, 1 - dt * 8); IN.y *= Math.max(0, 1 - dt * 8); }
+  }
+  L.acc += dt;
+  while (L.acc >= 0.02) { liveTick(); L.acc -= 0.02; }
+  if (!L.cur) return;
+  show(L.cur, L.disp, L.g5, L.cf);
+  drawLiveChart(); drawStick();
+  const P = flaps(FM.flapPos);
+  $('clock').textContent = (L.k * 0.02).toFixed(1) + ' s';
+  $('phase').textContent = FM.onGround ? 'On the ground: add throttle and pull back to take off' : FM.aoa > P.stall ? 'Stalled: push forward' : `${Math.round(FM.alt)} ft · ${FM.n.toFixed(1)} g · trim α ${IN.trim.toFixed(1)}°`;
+}
+
+// ================= wiring =================
+function tick(now) {
+  if (mode === 'auto') {
+    if (playing) {
+      const dt = (now - last) / 1000; last = now;
+      t += dt * speed();
+      if (t >= T.rows.length * 0.02 - 0.02) { t = T.rows.length * 0.02 - 0.02; setPlaying(false); }
+    }
+    renderAuto();
+  } else renderMan(now);
+  requestAnimationFrame(tick);
+}
+async function setMode(m) {
+  if (m === mode) return;
+  if (m === 'man' && !(await loadWasm())) { $('mMan').textContent = 'Fly it yourself (WebAssembly did not load)'; return; }
+  mode = m;
+  $('mAuto').setAttribute('aria-pressed', String(m === 'auto')); $('mMan').setAttribute('aria-pressed', String(m === 'man'));
+  $('intro').textContent = INTRO[m];
+  $('man').hidden = m !== 'man'; $('res').hidden = m !== 'auto';
+  $('transport').querySelectorAll('button,select,label').forEach(e => e.hidden = m !== 'auto');
+  $('scrub').hidden = m !== 'auto';
+  $('tlNote').textContent = m === 'auto' ? 'Audio plays at 1× only. Sound starts after you press Play. Headphones show the 3D audio pan during the steep turn (96–107 s).' : 'Last 30 seconds. The green band is OnSpeed for the current flaps; the dashed red line is the stall warning.';
+  if (m === 'man') {
+    setPlaying(false); await ensureCtx(); L.next = 0; last = performance.now(); M.lastIas = null;
+    if (!L.cur) resetFlight();
+  } else { lastDi = -1; drawChartBase(); }
+}
+$('mAuto').addEventListener('click', () => setMode('auto'));
+$('mMan').addEventListener('click', () => setMode('man'));
+$('play').addEventListener('click', () => { if (t >= T.rows.length * 0.02 - 0.05) t = 0; setPlaying(!playing); });
+$('scrub').addEventListener('input', e => { t = parseFloat(e.target.value); lastDi = -1; if (playing) startAudio(); });
+$('speed').addEventListener('change', () => { if (playing) startAudio(); });
+$('snd').addEventListener('change', () => { if (playing) startAudio(); });
+document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
+  page = +b.dataset.p; document.querySelectorAll('.tabs button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+}));
+$('chart').addEventListener('click', e => {
+  if (mode !== 'auto') return;
+  const rc = e.target.getBoundingClientRect(), fx = (e.clientX - rc.left) / rc.width * e.target.width;
+  t = Math.max(0, Math.min(160, (fx - 34) / (e.target.width - 44) * 160)); lastDi = -1; if (playing) startAudio();
+});
+// stick pad: pointer drag, springs back to centre (trim) on release
+const stick = $('stick');
+function stickAt(e) {
+  const rc = stick.getBoundingClientRect(), r = rc.width / 2 - rc.width * 50 / 420;
+  let x = (e.clientX - rc.left - rc.width / 2) / r, y = (e.clientY - rc.top - rc.height / 2) / r;
+  const m = Math.hypot(x, y); if (m > 1) { x /= m; y /= m; }
+  IN.x = x; IN.y = y;
+}
+stick.addEventListener('pointerdown', e => { IN.dragging = true; stick.setPointerCapture(e.pointerId); stickAt(e); ensureCtx(); });
+stick.addEventListener('pointermove', e => { if (IN.dragging) stickAt(e); });
+['pointerup', 'pointercancel'].forEach(ev => stick.addEventListener(ev, () => { IN.dragging = false; }));
+$('thr').addEventListener('input', e => setThr(e.target.value / 100));
+$('rud').addEventListener('input', e => setRud(e.target.value / 100));
+$('rud0').addEventListener('click', () => setRud(0));
+document.querySelectorAll('[data-f]').forEach(b => b.addEventListener('click', () => setFlaps(+b.dataset.f)));
+$('trim').addEventListener('click', () => { IN.trim = FM.aoa; IN.y = 0; });
+$('reset').addEventListener('click', () => { resetFlight(); M.lastIas = null; });
+$('mSnd').addEventListener('change', () => ensureCtx());
+window.addEventListener('keydown', e => {
+  if (mode !== 'man' || e.target.tagName === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') return;
+  if (e.code.startsWith('Arrow')) e.preventDefault();
+  KEYS[e.code] = true;
+  if (e.code === 'KeyF') cycleFlaps();
+  if (e.code === 'KeyT') { IN.trim = FM.aoa; IN.ky = 0; }
+  ensureCtx();
+});
+window.addEventListener('keyup', e => { KEYS[e.code] = false; });
+window.addEventListener('blur', () => { for (const k in KEYS) KEYS[k] = false; });
+
+$('intro').textContent = INTRO.auto;
+fetch('trace.json').then(r => r.json()).then(data => {
+  T = data;
+  $('scrub').max = (T.rows.length - 1) * 0.02;
+  const ok = T.checks.filter(c => c.ok).length;
+  $('score').textContent = `${ok} of ${T.checks.length} passed`;
+  $('checks').innerHTML = T.checks.map(c => `<tr><td class="s ${c.ok ? 'ok' : 'no'}">${c.ok ? 'PASS' : 'FAIL'}</td><td>${c.name}<div class="d">${c.detail}</div></td></tr>`).join('');
+  const m = Object.fromEntries((T.metrics || '').replace(/^M,/, '').split(',').filter(Boolean).map(s => s.split('=')));
+  $('metrics').textContent = `Flight: ${T.rows.length} sensor cycles at 50 Hz, ${T.display.length} display sentences, ${T.g5.length} G5 sentences. QEMU cycle counter, not real ESP32-S3 timing: ${m.sensor_cycles_per_tick || '?'} per sensor cycle, ${m.synth_cycles_per_block || '?'} per 20 ms audio block.`;
+  t = 56; // open on the OnSpeed band so the first frame shows the indexer lit
+  drawChartBase();
+  $('loading').hidden = true; $('stage').hidden = false; $('tl').hidden = false; $('res').hidden = false;
+  requestAnimationFrame(tick);
+}).catch(() => { $('loading').textContent = 'The recorded flight did not load. Reload the page to try again.'; });
+})();
+</script>

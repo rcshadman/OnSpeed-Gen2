@@ -132,9 +132,34 @@ void Core::sensorRead(int pfwdRaw, int p45Raw, float pStaticMbar, int flapPotRaw
   s_.Palt = 145366.45f * (1 - powf((s_.Pstatic + cfg_.pStaticBias) / 1013.25f, 0.190284f));
 }
 
+static float checkRead(SensorHealth &h, bool ok, int status, float value) {
+  if (ok && status != 3) {
+    if (status == 2) h.stale++;
+    h.badRun = 0;
+    h.fault = false;
+    h.lastGood = value;
+    h.haveGood = true;
+    return value;
+  }
+  if (!ok) h.readErrors++; else h.diagnostic++;
+  if (h.badRun < 0xFFFF) h.badRun++;
+  if (h.badRun >= SENSOR_FAULT_READS || !h.haveGood) h.fault = true;
+  return h.lastGood;
+}
+
+void Core::sensorReadBytes(const uint8_t pfwd[2], bool pfwdOk, const uint8_t p45[2], bool p45Ok,
+                           const uint8_t pstatic[4], bool staticOk, int flapPotRaw) {
+  float f = checkRead(s_.pfwdHealth, pfwdOk, pfwd[0] >> 6, (float)parseDiffPressure(pfwd));
+  float a = checkRead(s_.p45Health, p45Ok, p45[0] >> 6, (float)parseDiffPressure(p45));
+  float p = checkRead(s_.staticHealth, staticOk, pstatic[0] >> 6, parseStaticPressure(pstatic));
+  s_.sensorFault = s_.pfwdHealth.fault || s_.p45Health.fault;
+  if (!s_.staticHealth.haveGood) p = 1013.25f - cfg_.pStaticBias;  // no static yet: standard day, sea level
+  sensorRead((int)f, (int)a, p, flapPotRaw);
+}
+
 void Core::updateTones() {
   float AOA = s_.AOA;
-  if (s_.IAS <= cfg_.muteAudioUnderIAS) {
+  if (s_.IAS <= cfg_.muteAudioUnderIAS || s_.sensorFault) {
     s_.toneMode = TONE_OFF;
     s_.pps = 20;
     return;
@@ -175,20 +200,33 @@ int Core::percentLift() const {
   return (int)pl;
 }
 
+// Port addition: Gen2 prints values straight into fixed-width fields, so an out-of-range value
+// (IAS over 999.9 kt, VSI over 9990 fpm, a NaN altitude) widens a field and shifts every later one
+// while the checksum still passes. Scale, round toward zero like the int() casts, and clamp to the field.
+static int fit(float v, float scale, int lo, int hi) {
+  if (isnan(v)) return 0;
+  float x = v * scale;
+  if (x < lo) return lo;
+  if (x > hi) return hi;
+  return (int)x;
+}
+
 int Core::buildDisplaySentence(char *out, size_t cap, float pitch, float roll, float palt,
                                float yawRate, float lateralG, float verticalG, float vsiFpm,
                                float flightPath, int dataMark) const {
-  float displayAOA = s_.IAS >= cfg_.muteAudioUnderIAS ? s_.AOA : 0;
-  int displayVerticalG = (int)ceilf(verticalG * 10.0f);
+  float displayAOA = s_.IAS >= cfg_.muteAudioUnderIAS && !s_.sensorFault ? s_.AOA : 0;
+  int displayVerticalG = fit(ceilf(verticalG * 10.0f), 1, -9, 99);
   int gOnsetRate = 0, spinRecoveryCue = 0, OATc = 0;
   char buf[96];
   snprintf(buf, sizeof buf,
            "#1%+04i%+05i%04u%+06i%+05i%+03i%+03i%02u%+04i%+04i%+03i%+04i%+03i%+04i%+04i%+04i%+04i%+04i%+02i%02u",
-           int(pitch * 10), int(roll * 10), unsigned(s_.IAS * 10), int(palt), int(yawRate * 10),
-           int(-lateralG * 100), displayVerticalG, unsigned(percentLift()), int(displayAOA * 10),
-           int(floorf(vsiFpm / 10)), int(OATc), int(flightPath * 10), int(s_.flapsPos),
-           int(s_.stallWarningAOA * 10), int(s_.onSpeedAOAslow * 10), int(s_.onSpeedAOAfast * 10),
-           int(s_.LDmaxAOA * 10), int(gOnsetRate * 100), int(spinRecoveryCue), unsigned(dataMark));
+           fit(pitch, 10, -999, 999), fit(roll, 10, -9999, 9999), unsigned(fit(s_.IAS, 10, 0, 9999)),
+           fit(palt, 1, -99999, 99999), fit(yawRate, 10, -9999, 9999), fit(-lateralG, 100, -99, 99),
+           displayVerticalG, unsigned(s_.sensorFault ? 0 : percentLift()), fit(displayAOA, 10, -999, 999),
+           int(fit(floorf(vsiFpm / 10), 1, -999, 999)), int(OATc), fit(flightPath, 10, -999, 999),
+           fit(s_.flapsPos, 1, -99, 99), fit(s_.stallWarningAOA, 10, -999, 999),
+           fit(s_.onSpeedAOAslow, 10, -999, 999), fit(s_.onSpeedAOAfast, 10, -999, 999),
+           fit(s_.LDmaxAOA, 10, -999, 999), int(gOnsetRate * 100), int(spinRecoveryCue), unsigned(dataMark % 100));
   uint8_t crc = 0;
   for (int i = 0; i <= 75; i++) crc += (uint8_t)buf[i];
   return snprintf(out, cap, "%.76s%02X\r\n", buf, crc);

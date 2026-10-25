@@ -77,6 +77,20 @@ class PressureFilter {
   float avg_[10]; int avgN_ = 0, avgPos_ = 0;
 };
 
+// Port addition (not in Gen2): per-sensor read health. Gen2 masks the Honeywell status bits and
+// feeds a failed read (-1) straight into the filters; here a failed or diagnostic read reuses the
+// last good value and a run of them raises a fault that mutes the tones instead of sounding wrong ones.
+struct SensorHealth {
+  uint32_t readErrors = 0;   // I2C transaction failed (NACK, timeout, bus error)
+  uint32_t diagnostic = 0;   // status bits 11: sensor reports a fault
+  uint32_t stale = 0;        // status bits 10: read faster than the sensor updates (harmless)
+  uint16_t badRun = 0;       // consecutive bad reads
+  bool fault = false;
+  float lastGood = 0;
+  bool haveGood = false;
+};
+constexpr int SENSOR_FAULT_READS = 25;  // 0.5 s of bad reads at 50 Hz
+
 struct State {
   // inputs
   int flapPotRaw = 0;
@@ -90,6 +104,8 @@ struct State {
   ToneMode toneMode = TONE_OFF;
   bool highTone = false;
   float pps = 20;
+  SensorHealth pfwdHealth, p45Health, staticHealth;
+  bool sensorFault = false;  // pitot-side pressure sensor failed: tones muted, display shows 0 AOA
 };
 
 class Core {
@@ -97,6 +113,9 @@ class Core {
   explicit Core(const Config &cfg);
   // One 50 Hz sensor cycle (SensorRead.ino): raw sensor counts in, AOA/IAS out.
   void sensorRead(int pfwdRaw, int p45Raw, float pStaticMbar, int flapPotRaw);
+  // Same cycle from the raw sensor bytes plus each read's I2C result, with fault handling.
+  void sensorReadBytes(const uint8_t pfwd[2], bool pfwdOk, const uint8_t p45[2], bool p45Ok,
+                       const uint8_t pstatic[4], bool staticOk, int flapPotRaw);
   void updateTones();  // Tones.ino updateTones()
   int percentLift() const;  // DisplaySerial.ino
   // Build the 80-byte "#1" ONSPEED display sentence (DisplaySerial.ino) incl. checksum + CRLF.

@@ -5,6 +5,7 @@
 #include "g5.h"
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 #define EXPORT(name) extern "C" __attribute__((export_name(#name)))
 using namespace onspeed;
 
@@ -105,3 +106,39 @@ EXPORT(os_fly) void os_fly(float ias, float aoa, float flapPot, float palt, floa
   os_step(pf[0], pf[1], p45[0], p45[1], ps[0], ps[1], ps[2], ps[3], (int)lroundf(flapPot), latG);
 }
 EXPORT(os_flap_pot) int os_flap_pot(int i) { return g_cfg.flapPotPositions[i]; }
+
+// ---- MakerPlane EFIS over CAN-FiX: the box publishes AOA, the EFIS sends attitude back ----
+#include "canfix.h"
+static char g_can[640];
+static int g_canLen = 0;
+static bool canTap(const CanFrame &f, void *) {
+  if (g_canLen < (int)sizeof g_can - 40) {
+    g_canLen += snprintf(g_can + g_canLen, sizeof g_can - g_canLen, "%03X#", f.id);
+    for (int i = 0; i < f.dlc; i++) g_canLen += snprintf(g_can + g_canLen, sizeof g_can - g_canLen, "%02X", f.data[i]);
+    g_can[g_canLen++] = ' ';
+    g_can[g_canLen] = 0;
+  }
+  return true;
+}
+static CanfixNode g_node(CanfixNode::Config{}, canTap, nullptr);
+// Publishes this cycle's OnSpeed outputs and feeds the EFIS's own frames back in; returns the bus traffic.
+EXPORT(os_canfix) const char *os_canfix(int nowMs, float pitch, float roll, float ias, int palt, int hdg, int vsi, float latG, float vertG) {
+  g_canLen = 0; g_can[0] = 0;
+  const State &s = g_core->state();
+  OnSpeedOutputs o;
+  o.AOA = s.sensorFault ? kNaN : s.AOA;
+  o.IAS = s.IAS;
+  o.LDmaxAOA = s.LDmaxAOA; o.onSpeedFastAOA = s.onSpeedAOAfast; o.onSpeedSlowAOA = s.onSpeedAOAslow;
+  o.stallWarnAOA = s.stallWarningAOA;
+  g_node.publish(o, nowMs);
+  const uint8_t efisNode = 0x91;  // FIX-Gateway's default node
+  CanFrame f;
+  struct { uint16_t id; float v; } p[] = {{canfix::PITCH, pitch}, {canfix::ROLL, roll}, {canfix::IAS, ias},
+      {canfix::PALT, (float)palt}, {canfix::HEAD, (float)hdg}, {canfix::VS, (float)vsi},
+      {canfix::ALAT, latG}, {canfix::ANORM, vertG}};
+  for (auto &k : p) if (canfix::encodeParam(efisNode, k.id, k.v, f)) { canTap(f, nullptr); g_node.onFrame(f, nowMs); }
+  return g_can;
+}
+EXPORT(os_canfix_pitch) float os_canfix_pitch() { return g_node.efis().pitch; }
+EXPORT(os_canfix_roll) float os_canfix_roll() { return g_node.efis().roll; }
+EXPORT(os_canfix_sent) int os_canfix_sent() { return (int)g_node.framesSent(); }
