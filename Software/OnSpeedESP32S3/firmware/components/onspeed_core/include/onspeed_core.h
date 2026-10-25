@@ -1,0 +1,118 @@
+// OnSpeed core logic, ported from OnSpeed-Gen2 (Software/OnSpeedTeensy_AHRS) v3.3.7g
+// to plain C++ with no Arduino or Teensy dependencies, so it runs on ESP32-S3 (ESP-IDF)
+// and on a desktop for testing. Function names follow the original sketch.
+#pragma once
+#include <stdint.h>
+#include <stddef.h>
+
+namespace onspeed {
+
+constexpr int MAX_AOA_CURVES = 5;
+constexpr int MAX_CURVE_COEFF = 4;
+
+constexpr float AOA_MAX_VALUE = 40;
+constexpr float AOA_MIN_VALUE = -20;
+
+// Tones.ino / OnSpeedTeensy_AHRS.ino
+constexpr float HIGH_TONE_STALL_PPS = 20;
+constexpr float HIGH_TONE_PPS_MAX = 6.2f;
+constexpr float HIGH_TONE_PPS_MIN = 1.5f;
+constexpr int   HIGH_TONE_HZ = 1600;
+constexpr float LOW_TONE_PPS_MAX = 8.2f;
+constexpr float LOW_TONE_PPS_MIN = 1.5f;
+constexpr int   LOW_TONE_HZ = 400;
+constexpr float TONE_RAMP_TIME = 15;   // ms
+constexpr float STALL_RAMP_TIME = 5;   // ms
+constexpr float LOW_TONE_VOLUME = .25f;
+constexpr float HIGH_TONE_VOLUME_MIN = .25f;
+constexpr float SOLID_TONE_VOLUME = .25f;
+constexpr float HIGH_TONE_VOLUME_MAX = 1;
+
+enum ToneMode : uint8_t { PULSE_TONE = 1, SOLID_TONE = 2, TONE_OFF = 3 };
+
+struct CalibrationCurve {
+  float Items[MAX_CURVE_COEFF];
+  uint8_t curveType;  // 1 polynomial, 2 logarithmic, 3 exponential
+};
+
+// The subset of onspeed.cfg the core logic needs (default_config.h, RV-4).
+struct Config {
+  int aoaSmoothing = 10;
+  int pressureSmoothing = 15;
+  int flapCount = 3;
+  int flapDegrees[MAX_AOA_CURVES] = {0, 20, 40};
+  int flapPotPositions[MAX_AOA_CURVES] = {129, 158, 206};
+  float LDmaxAOA[MAX_AOA_CURVES] = {8.03f, 5.73f, 4.78f};
+  float onSpeedFastAOA[MAX_AOA_CURVES] = {11.25f, 9.74f, 8.62f};
+  float onSpeedSlowAOA[MAX_AOA_CURVES] = {13.84f, 12.64f, 12.44f};
+  float stallWarnAOA[MAX_AOA_CURVES] = {16.48f, 16.29f, 14.51f};
+  CalibrationCurve aoaCurve[MAX_AOA_CURVES] = {
+      {{0.0f, 8.4845f, 24.0804f, 4.6157f}, 1},
+      {{0.0f, 4.5244f, 27.9928f, 2.7661f}, 1},
+      {{0.0f, 1.2984f, 30.4239f, 1.4550f}, 1}};
+  CalibrationCurve casCurve = {{0.0f, 0.0f, 0.9770f, 4.1620f}, 1};
+  bool casCurveEnabled = true;
+  int pFwdBias = 8108;
+  int p45Bias = 8058;
+  float pStaticBias = -2.1997f;
+  int muteAudioUnderIAS = 25;
+};
+
+float mapfloat(float x, float in_min, float in_max, float out_min, float out_max);
+long arduino_map(long x, long in_min, long in_max, long out_min, long out_max);
+float curveCalc(float x, const CalibrationCurve &curve);
+
+// Honeywell sensor transfer functions (SensorRead.ino). These take the raw I2C bytes,
+// so the same code path runs whether the bytes come from a real sensor or the simulator.
+int parseDiffPressure(const uint8_t b[2]);       // 14-bit counts, status bits masked
+float parseStaticPressure(const uint8_t b[4]);   // millibars, SSCSRNN1.6BA7A3
+
+// RunningMedian + RunningAverage(10) as used for pressure despiking/smoothing.
+class PressureFilter {
+ public:
+  void init(int medianWindow);
+  float add(float v);
+ private:
+  float med_[32]; int medN_ = 0, medPos_ = 0, medWin_ = 15;
+  float avg_[10]; int avgN_ = 0, avgPos_ = 0;
+};
+
+struct State {
+  // inputs
+  int flapPotRaw = 0;
+  // derived
+  int flapsIndex = 0, flapsPos = 0;
+  float Pfwd = 0, P45 = 0, PfwdSmoothed = 0, P45Smoothed = 0;
+  float coeffP = 0, AOA = 0, IAS = 0;
+  float Pstatic = 0, Palt = 0;
+  float LDmaxAOA = 0, onSpeedAOAfast = 0, onSpeedAOAslow = 0, stallWarningAOA = 0;
+  // tone selection (updateTones)
+  ToneMode toneMode = TONE_OFF;
+  bool highTone = false;
+  float pps = 20;
+};
+
+class Core {
+ public:
+  explicit Core(const Config &cfg);
+  // One 50 Hz sensor cycle (SensorRead.ino): raw sensor counts in, AOA/IAS out.
+  void sensorRead(int pfwdRaw, int p45Raw, float pStaticMbar, int flapPotRaw);
+  void updateTones();  // Tones.ino updateTones()
+  int percentLift() const;  // DisplaySerial.ino
+  // Build the 80-byte "#1" ONSPEED display sentence (DisplaySerial.ino) incl. checksum + CRLF.
+  // Returns the length written (80).
+  int buildDisplaySentence(char *out, size_t cap, float pitch, float roll, float palt,
+                           float yawRate, float lateralG, float verticalG,
+                           float vsiFpm, float flightPath, int dataMark) const;
+  const State &state() const { return s_; }
+  const Config &config() const { return cfg_; }
+ private:
+  int getFlapsIndex(int pot) const;
+  void setAOApoints(int i);
+  void calcAOA(float Pfwd, float P45);
+  Config cfg_;
+  State s_;
+  PressureFilter fwdF_, p45F_;
+};
+
+}  // namespace onspeed

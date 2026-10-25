@@ -1,0 +1,38 @@
+"""Independent Python re-implementation of the Gen2 sensor-to-AOA path (SensorRead.ino,
+AOAcalc.ino, CurveCalc.ino with RunningMedian/RunningAverage), fed with the same simulated
+sensor counts as the virtual board. Returns AOA per 50 Hz cycle."""
+import numpy as np
+CURVES = {0: (8.4845, 24.0804, 4.6157), 20: (4.5244, 27.9928, 2.7661), 40: (1.2984, 30.4239, 1.4550)}
+def reference_aoa(D, bias=8192):
+    lcg = 12345
+    def noise():
+        nonlocal lcg
+        lcg = (lcg * 1664525 + 1013904223) & 0xFFFFFFFF
+        return ((lcg >> 16) % 5) - 2
+    med_f, med_p, avg_f, avg_p = [], [], [], []
+    aoa, out, n = 0.0, [], 0
+    for d in D:
+        ias = d["iasTrue"]
+        ind = (ias - 4.162) / 0.977 if ias > 5 else ias
+        v = ind / 1.94384; q = 0.5 * 1.225 * v * v
+        fwd = int(np.round(np.float32(q / 6894.757 * (0.8 * 16383 / 2))))
+        n += 1
+        rf = bias + fwd + noise()
+        if n % 97 == 0: rf += 400
+        A, B, C = CURVES[d["flaps"]]
+        disc = B * B - 4 * A * (C - d["aoaTrue"])
+        cp = (-B + disc ** .5) / (2 * A)
+        rp = bias + int(np.round(cp * fwd)) + noise()
+        rf = min(max(rf, 0), 16383); rp = min(max(rp, 0), 16383)
+        pf, p4 = rf - bias, rp - bias
+        med_f = (med_f + [pf])[-15:]; med_p = (med_p + [p4])[-15:]
+        avg_f = (avg_f + [float(np.median(med_f))])[-10:]; avg_p = (avg_p + [float(np.median(med_p))])[-10:]
+        sf, sp = np.mean(avg_f), np.mean(avg_p)
+        if sf > 0:
+            x = sp / sf
+            aoa = (A * x * x + B * x + C) * 0.1 + 0.9 * aoa
+            aoa = min(max(aoa, -20), 40)
+        else:
+            aoa = -20
+        out.append(aoa)
+    return out
